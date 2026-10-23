@@ -1,0 +1,30 @@
+name: Build macOS plugins
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -G Xcode
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp -R build/Cutbench_artefacts/Release/AU/Cutbench.component dist/
+          cp -R build/Cutbench_artefacts/Release/VST3/Cutbench.vst3 dist/
+          cd dist && zip -qry ../Cutbench-macOS.zip .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cutbench-macOS
+          path: Cutbench-macOS.zip
