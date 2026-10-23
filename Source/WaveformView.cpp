@@ -284,7 +284,8 @@ void WaveformView::paint (juce::Graphics& g)
         g.fillRect (x0, (float) area.getY(), x1 - x0, (float) area.getHeight());
     }
 
-    // Slice strip with numbers, then boundary lines
+    // Slice strip with numbers (and the MIDI key that plays each slice), then boundary lines
+    const int baseNote = juce::roundToInt (proc.apvts.getRawParameterValue ("baseNote")->load());
     g.setFont (11.0f);
     for (size_t i = 0; i < slices.size(); ++i)
     {
@@ -303,8 +304,12 @@ void WaveformView::paint (juce::Graphics& g)
             if (strip.getWidth() > 16.0f)
             {
                 g.setColour (juce::Colours::black.withAlpha (0.85f));
-                g.drawText (juce::String ((int) i + 1), strip.reduced (4.0f, 0.0f),
-                            juce::Justification::centredLeft, false);
+                juce::String label (juce::String ((int) i + 1));
+                const int note = baseNote + (int) i;
+                if (strip.getWidth() > 48.0f && note <= 127)
+                    label += "   " + juce::MidiMessage::getMidiNoteName (note, true, true, 3);
+
+                g.drawText (label, strip.reduced (4.0f, 0.0f), juce::Justification::centredLeft, false);
             }
         }
 

@@ -7,17 +7,18 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
 
     addAndMakeVisible (waveform);
     for (auto* b : { &loadButton, &playButton, &stopButton, &addButton, &splitButton,
-                     &deleteButton, &resetButton, &zoomInButton, &zoomOutButton, &fitButton })
+                     &deleteButton, &resetButton, &chopButton, &zoomInButton, &zoomOutButton, &fitButton })
         addAndMakeVisible (*b);
     for (auto* l : { &fileLabel, &infoLabel, &statusLabel, &hintLabel,
-                     &gainLabel, &noteLabel, &modeLabel, &fadeLabel })
+                     &gainLabel, &noteLabel, &modeLabel, &retriggerLabel, &fadeLabel })
         addAndMakeVisible (*l);
-    for (auto* s : { &gainSlider, &noteSlider, &fadeSlider })
+    for (auto* s : { &gainSlider, &noteSlider, &fadeSlider, &chopCountSlider })
     {
         s->setSliderStyle (juce::Slider::LinearBar);
         addAndMakeVisible (*s);
     }
     addAndMakeVisible (modeBox);
+    addAndMakeVisible (retriggerBox);
 
     // --- labels ---
     auto small = [] (juce::Label& l, const juce::String& text, juce::Justification j = juce::Justification::centredLeft)
@@ -30,9 +31,10 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     small (gainLabel, "GAIN");
     small (noteLabel, "BASE NOTE (SLICE 1)");
     small (modeLabel, "PLAY MODE");
+    small (retriggerLabel, "RETRIGGER");
     small (fadeLabel, "DECLICK FADE");
     small (statusLabel, {});
-    small (hintLabel, "drag: select | dbl-click: split | drag edges: adjust | space: play/stop | cmd/ctrl+scroll: zoom",
+    small (hintLabel, "keys play slices left to right | dbl-click: split | drag: select + Add Slice | drag edges: adjust | space: play",
            juce::Justification::centredRight);
     small (infoLabel, "BPM --    KEY --", juce::Justification::centredRight);   // detection arrives in a later phase
 
@@ -46,6 +48,13 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
 
     modeBox.addItemList ({ "One-Shot", "Gate" }, 1);
     modeAttachment = std::make_unique<ComboBoxAttachment> (proc.apvts, "playMode", modeBox);
+
+    retriggerBox.addItemList ({ "Cut", "Layer" }, 1);
+    retriggerAttachment = std::make_unique<ComboBoxAttachment> (proc.apvts, "retrigger", retriggerBox);
+
+    chopCountSlider.setRange (2.0, (double) CutbenchProcessor::kMaxSlices, 1.0);
+    chopCountSlider.setValue (8.0, juce::dontSendNotification);
+    chopCountSlider.setTextValueSuffix (" slices");
 
     // The attachments install their own text functions, so ours go after them.
     gainSlider.textFromValueFunction = [] (double v) { return v <= -59.95 ? juce::String ("-inf dB") : juce::String (v, 1) + " dB"; };
@@ -67,6 +76,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     splitButton.onClick   = [this] { proc.splitAt (waveform.getCursor()); };
     deleteButton.onClick  = [this] { proc.removeSlice (proc.getSelectedSlice()); };
     resetButton.onClick   = [this] { proc.resetSlices(); };
+    chopButton.onClick    = [this] { proc.chopEqual ((int) chopCountSlider.getValue()); };
     zoomInButton.onClick  = [this] { waveform.zoomBy (0.5); };
     zoomOutButton.onClick = [this] { waveform.zoomBy (2.0); };
     fitButton.onClick     = [this] { waveform.zoomToFit(); };
@@ -76,7 +86,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     proc.addChangeListener (this);
 
     setResizable (true, true);
-    setResizeLimits (720, 420, 2400, 1400);
+    setResizeLimits (820, 420, 2400, 1400);
     setSize (1000, 600);
 
     changeListenerCallback (nullptr);   // initial sync
@@ -196,11 +206,13 @@ void CutbenchEditor::resized()
     place (addButton, 90);
     place (splitButton, 64);
     place (deleteButton, 70);
-    place (resetButton, 70);
+    place (resetButton, 70, 18);
+    place (chopButton, 90);
+    place (chopCountSlider, 100);
 
     auto row2 = c;
     const int gap = 12;
-    const int colW = (row2.getWidth() - 3 * gap) / 4;
+    const int colW = (row2.getWidth() - 4 * gap) / 5;
     auto column = [&row2, colW, gap] (juce::Label& label, juce::Component& comp)
     {
         auto col = row2.removeFromLeft (colW);
@@ -211,5 +223,6 @@ void CutbenchEditor::resized()
     column (gainLabel, gainSlider);
     column (noteLabel, noteSlider);
     column (modeLabel, modeBox);
+    column (retriggerLabel, retriggerBox);
     column (fadeLabel, fadeSlider);
 }

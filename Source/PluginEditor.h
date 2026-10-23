@@ -34,16 +34,16 @@ private:
 
     juce::TextButton loadButton { "Load..." }, playButton { "Play" }, stopButton { "Stop" },
                      addButton { "Add Slice" }, splitButton { "Split" },
-                     deleteButton { "Delete" }, resetButton { "Reset" },
+                     deleteButton { "Delete" }, resetButton { "Reset" }, chopButton { "Chop Equal" },
                      zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" };
 
     juce::Label fileLabel, infoLabel, statusLabel, hintLabel;
-    juce::Label gainLabel, noteLabel, modeLabel, fadeLabel;
-    juce::Slider gainSlider, noteSlider, fadeSlider;
-    juce::ComboBox modeBox;
+    juce::Label gainLabel, noteLabel, modeLabel, retriggerLabel, fadeLabel;
+    juce::Slider gainSlider, noteSlider, fadeSlider, chopCountSlider;
+    juce::ComboBox modeBox, retriggerBox;
 
     std::unique_ptr<SliderAttachment> gainAttachment, noteAttachment, fadeAttachment;
-    std::unique_ptr<ComboBoxAttachment> modeAttachment;
+    std::unique_ptr<ComboBoxAttachment> modeAttachment, retriggerAttachment;
 
     juce::Rectangle<int> controlsArea;
     std::unique_ptr<juce::FileChooser> chooser;

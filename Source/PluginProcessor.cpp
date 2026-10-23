@@ -24,6 +24,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout CutbenchProcessor::createLay
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "fadeMs", 1 }, "Fade",
                                                        NormalisableRange<float> (0.5f, 20.0f, 0.1f), 2.0f,
                                                        AudioParameterFloatAttributes().withLabel ("ms")));
+
+    // What happens when the same key is hit again while its sound is still playing
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "retrigger", 1 }, "Retrigger",
+                                                        StringArray { "Cut", "Layer" }, 0));
     return layout;
 }
 
@@ -42,6 +46,7 @@ CutbenchProcessor::CutbenchProcessor()
     baseNoteParam = apvts.getRawParameterValue ("baseNote");
     playModeParam = apvts.getRawParameterValue ("playMode");
     fadeParam     = apvts.getRawParameterValue ("fadeMs");
+    retriggerParam = apvts.getRawParameterValue ("retrigger");
 }
 
 CutbenchProcessor::~CutbenchProcessor()
@@ -94,6 +99,7 @@ void CutbenchProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     fadeSamples = juce::jmax (1.0f, fadeParam->load() * 0.001f * (float) currentSampleRate);
     gateMode    = playModeParam->load() > 0.5f;
+    retriggerCut = retriggerParam->load() < 0.5f;
     baseNote    = juce::roundToInt (baseNoteParam->load());
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainParam->load(), -60.0f));
 
@@ -147,7 +153,14 @@ void CutbenchProcessor::handleMidi (const juce::MidiMessage& m)
     {
         juce::int64 s = 0, e = 0;
         if (getSliceRange (m.getNoteNumber() - baseNote, s, e))
+        {
+            if (retriggerCut)   // fade out earlier hits of this key instead of stacking them
+                for (auto& v : voices)
+                    if (v.active && ! v.preview && v.note == m.getNoteNumber())
+                        v.releasing = true;
+
             startVoice (m.getNoteNumber(), s, e, m.getFloatVelocity(), false);
+        }
     }
     else if (m.isNoteOff())
     {
@@ -546,6 +559,11 @@ int CutbenchProcessor::addSlice (juce::int64 start, juce::int64 end)
         if (end - start < kMinSliceLength)
             return -1;
 
+        // The untouched default slice (whole file) gives way to the first slice the user creates,
+        // otherwise slice 1 / the base note would keep playing the entire file.
+        if (slices.size() == 1 && slices[0].start == 0 && slices[0].end == len)
+            slices.clear();
+
         auto it = std::upper_bound (slices.begin(), slices.end(), start,
                                     [] (juce::int64 v, const Slice& s) { return v < s.start; });
         result = (int) (it - slices.begin());
@@ -609,6 +627,33 @@ void CutbenchProcessor::resetSlices()
         if (currentSample == nullptr)
             return;
         slices.assign (1, Slice { 0, (juce::int64) currentSample->numFrames() });
+        selectedSlice = 0;
+        publishSlices();
+    }
+    sendChangeMessage();
+}
+
+void CutbenchProcessor::chopEqual (int numSlices)
+{
+    {
+        const juce::ScopedLock sl (modelLock);
+        if (currentSample == nullptr)
+            return;
+
+        const juce::int64 len = currentSample->numFrames();
+        const int n = juce::jlimit (1, kMaxSlices, numSlices);
+
+        slices.clear();
+        for (int i = 0; i < n; ++i)
+        {
+            const juce::int64 s = (len * i) / n;
+            const juce::int64 e = (len * (i + 1)) / n;
+            if (e - s >= kMinSliceLength)
+                slices.push_back ({ s, e });
+        }
+        if (slices.empty())
+            slices.push_back ({ 0, len });
+
         selectedSlice = 0;
         publishSlices();
     }

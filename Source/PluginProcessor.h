@@ -69,6 +69,7 @@ public:
     bool splitAt (juce::int64 position);                         // split the slice containing position
     void removeSlice (int index);
     void resetSlices();                                          // one slice covering the whole file
+    void chopEqual (int numSlices);                              // replace all slices with N equal ones
 
     // Moves every slice edge located at oldPosition (shared boundaries move together).
     // Returns the position actually applied (clamped).
@@ -151,6 +152,7 @@ private:
     std::atomic<float>* baseNoteParam = nullptr;
     std::atomic<float>* playModeParam = nullptr;
     std::atomic<float>* fadeParam = nullptr;
+    std::atomic<float>* retriggerParam = nullptr;
 
     // ---- audio-thread-only state ----
     const SampleData* activeSample = nullptr;
@@ -159,6 +161,7 @@ private:
     double currentSampleRate = 44100.0;
     float fadeSamples = 64.0f;
     bool gateMode = false;
+    bool retriggerCut = true;
     int baseNote = 36;
     juce::SmoothedValue<float> gainSmoothed;
 

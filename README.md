@@ -31,6 +31,7 @@ cmake --build build --config Release
 | Seek / set play start | Click the waveform (sets the cursor and selects the slice under it) |
 | Select a region | Drag |
 | Add slice from selection | Add Slice |
+| Chop evenly | Set the slice count, press Chop Equal (replaces all slices) |
 | Split a slice | Double-click, or Split (splits at the cursor) |
 | Adjust boundaries | Drag a slice edge (touching slices move together) |
 | Audition a slice | Click its numbered strip at the top |
@@ -38,8 +39,8 @@ cmake --build build --config Release
 | Delete slice | Delete button or Delete key |
 | Zoom / scroll | Cmd/Ctrl + scroll, pinch, +/-/Fit; scroll or swipe to pan, scroll bar below |
 
-**MIDI:** note `Base Note + n` plays slice `n+1` (default base note 36 = C1, as in a Drum Rack).
-Velocity scales gain. *One-Shot* plays the whole slice; *Gate* releases on note-off. Voices overlap (32 max).
+**MIDI:** note `Base Note + n` plays slice `n+1`, numbered left to right (default base note 36 = C1, as in a Drum Rack).
+Velocity scales gain. *Retrigger* = Cut fades out the previous hit of the same key; Layer stacks hits. *One-Shot* plays the whole slice; *Gate* releases on note-off. Voices overlap (32 max).
 Parameters (gain, base note, play mode, fade) are host-automatable. The project saves the slice list and the
 audio file *path*; if the file has moved, Cutbench keeps the slice data and shows a "not found" message.
 
