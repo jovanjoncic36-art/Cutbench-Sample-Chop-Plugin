@@ -1,16 +1,17 @@
 #include "PluginEditor.h"
 
 CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), waveform (p)
+    : AudioProcessorEditor (&p), proc (p), waveform (p), padGrid (p)
 {
     setLookAndFeel (&lnf);
 
     addAndMakeVisible (waveform);
-    for (auto* b : { &loadButton, &playButton, &stopButton, &addButton, &splitButton,
-                     &deleteButton, &resetButton, &chopButton, &zoomInButton, &zoomOutButton, &fitButton })
+    addAndMakeVisible (padGrid);
+    for (auto* b : { &loadButton, &playButton, &stopButton, &setPadButton, &clearPadButton, &clearAllButton,
+                     &chopButton, &zoomInButton, &zoomOutButton, &fitButton })
         addAndMakeVisible (*b);
     for (auto* l : { &fileLabel, &infoLabel, &statusLabel, &hintLabel,
-                     &gainLabel, &noteLabel, &modeLabel, &retriggerLabel, &fadeLabel })
+                     &gainLabel, &noteLabel, &modeLabel, &padModeLabel, &fadeLabel })
         addAndMakeVisible (*l);
     for (auto* s : { &gainSlider, &noteSlider, &fadeSlider, &chopCountSlider })
     {
@@ -18,7 +19,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
         addAndMakeVisible (*s);
     }
     addAndMakeVisible (modeBox);
-    addAndMakeVisible (retriggerBox);
+    addAndMakeVisible (padModeBox);
 
     // --- labels ---
     auto small = [] (juce::Label& l, const juce::String& text, juce::Justification j = juce::Justification::centredLeft)
@@ -29,12 +30,12 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
         l.setJustificationType (j);
     };
     small (gainLabel, "GAIN");
-    small (noteLabel, "BASE NOTE (SLICE 1)");
+    small (noteLabel, "BASE NOTE (PAD 1)");
     small (modeLabel, "PLAY MODE");
-    small (retriggerLabel, "RETRIGGER");
+    small (padModeLabel, "PAD MODE");
     small (fadeLabel, "DECLICK FADE");
     small (statusLabel, {});
-    small (hintLabel, "keys play slices left to right | dbl-click: split | drag: select + Add Slice | drag edges: adjust | space: play",
+    small (hintLabel, "play, then hit EMPTY pads to set cues | pad with cue: jump + play | dbl-click: set cue | right-click pad: clear",
            juce::Justification::centredRight);
     small (infoLabel, "BPM --    KEY --", juce::Justification::centredRight);   // detection arrives in a later phase
 
@@ -49,12 +50,12 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     modeBox.addItemList ({ "One-Shot", "Gate" }, 1);
     modeAttachment = std::make_unique<ComboBoxAttachment> (proc.apvts, "playMode", modeBox);
 
-    retriggerBox.addItemList ({ "Cut", "Layer" }, 1);
-    retriggerAttachment = std::make_unique<ComboBoxAttachment> (proc.apvts, "retrigger", retriggerBox);
+    padModeBox.addItemList ({ "Cue", "Slice" }, 1);
+    padModeAttachment = std::make_unique<ComboBoxAttachment> (proc.apvts, "padMode", padModeBox);
 
-    chopCountSlider.setRange (2.0, (double) CutbenchProcessor::kMaxSlices, 1.0);
+    chopCountSlider.setRange (2.0, (double) kNumPads, 1.0);
     chopCountSlider.setValue (8.0, juce::dontSendNotification);
-    chopCountSlider.setTextValueSuffix (" slices");
+    chopCountSlider.setTextValueSuffix (" pads");
 
     // The attachments install their own text functions, so ours go after them.
     gainSlider.textFromValueFunction = [] (double v) { return v <= -59.95 ? juce::String ("-inf dB") : juce::String (v, 1) + " dB"; };
@@ -69,25 +70,24 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
         s->updateText();
 
     // --- buttons ---
-    loadButton.onClick    = [this] { chooseFile(); };
-    playButton.onClick    = [this] { waveform.play(); };
-    stopButton.onClick    = [this] { proc.stopPreview(); };
-    addButton.onClick     = [this] { if (auto sel = waveform.getSelection()) proc.addSlice (sel->first, sel->second); };
-    splitButton.onClick   = [this] { proc.splitAt (waveform.getCursor()); };
-    deleteButton.onClick  = [this] { proc.removeSlice (proc.getSelectedSlice()); };
-    resetButton.onClick   = [this] { proc.resetSlices(); };
-    chopButton.onClick    = [this] { proc.chopEqual ((int) chopCountSlider.getValue()); };
-    zoomInButton.onClick  = [this] { waveform.zoomBy (0.5); };
-    zoomOutButton.onClick = [this] { waveform.zoomBy (2.0); };
-    fitButton.onClick     = [this] { waveform.zoomToFit(); };
+    loadButton.onClick     = [this] { chooseFile(); };
+    playButton.onClick     = [this] { waveform.play(); };
+    stopButton.onClick     = [this] { proc.stopPreview(); };
+    setPadButton.onClick   = [this] { waveform.assignToSelectedPad(); };
+    clearPadButton.onClick = [this] { proc.clearPad (proc.getSelectedPad()); };
+    clearAllButton.onClick = [this] { proc.clearAllPads(); };
+    chopButton.onClick     = [this] { proc.chopEqual ((int) chopCountSlider.getValue()); };
+    zoomInButton.onClick   = [this] { waveform.zoomBy (0.5); };
+    zoomOutButton.onClick  = [this] { waveform.zoomBy (2.0); };
+    fitButton.onClick      = [this] { waveform.zoomToFit(); };
 
     waveform.onViewStateChanged = [this] { refreshStatus(); };
 
     proc.addChangeListener (this);
 
     setResizable (true, true);
-    setResizeLimits (820, 420, 2400, 1400);
-    setSize (1000, 600);
+    setResizeLimits (860, 460, 2400, 1400);
+    setSize (1100, 640);
 
     changeListenerCallback (nullptr);   // initial sync
 }
@@ -101,6 +101,7 @@ CutbenchEditor::~CutbenchEditor()
 void CutbenchEditor::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     waveform.modelChanged();
+    padGrid.modelChanged();
     refreshStatus();
 }
 
@@ -175,13 +176,18 @@ void CutbenchEditor::resized()
 
     // status row
     auto statusRow = r.removeFromBottom (20);
-    hintLabel.setBounds (statusRow.removeFromRight (juce::jmin (560, statusRow.getWidth() / 2)));
+    hintLabel.setBounds (statusRow.removeFromRight (juce::jmin (700, (statusRow.getWidth() * 3) / 5)));
     statusLabel.setBounds (statusRow);
     r.removeFromBottom (6);
 
-    // controls + waveform (the waveform takes all remaining space)
+    // controls
     controlsArea = r.removeFromBottom (92);
     r.removeFromBottom (10);
+
+    // pad grid on the right, waveform takes everything else
+    auto padArea = r.removeFromRight (juce::jlimit (230, 340, r.getWidth() / 4));
+    r.removeFromRight (10);
+    padGrid.setBounds (padArea);
     waveform.setBounds (r);
 
     auto c = controlsArea.reduced (10, 8);
@@ -203,10 +209,9 @@ void CutbenchEditor::resized()
     };
     place (playButton, 64);
     place (stopButton, 64, 18);
-    place (addButton, 90);
-    place (splitButton, 64);
-    place (deleteButton, 70);
-    place (resetButton, 70, 18);
+    place (setPadButton, 80);
+    place (clearPadButton, 86);
+    place (clearAllButton, 80, 18);
     place (chopButton, 90);
     place (chopCountSlider, 100);
 
@@ -223,6 +228,6 @@ void CutbenchEditor::resized()
     column (gainLabel, gainSlider);
     column (noteLabel, noteSlider);
     column (modeLabel, modeBox);
-    column (retriggerLabel, retriggerBox);
+    column (padModeLabel, padModeBox);
     column (fadeLabel, fadeSlider);
 }

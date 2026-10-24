@@ -15,29 +15,30 @@ juce::AudioProcessorValueTreeState::ParameterLayout CutbenchProcessor::createLay
                                                        NormalisableRange<float> (-60.0f, 12.0f, 0.1f), 0.0f,
                                                        AudioParameterFloatAttributes().withLabel ("dB")));
 
-    // First MIDI note that maps to slice 1 (36 = C1 in Ableton's naming, like a Drum Rack)
-    layout.add (std::make_unique<AudioParameterInt> (ParameterID { "baseNote", 1 }, "Base Note", 0, 96, 36));
+    // MIDI note of pad 1 (36 = C1 in Ableton's naming, like a Drum Rack); pad n = base note + n - 1
+    layout.add (std::make_unique<AudioParameterInt> (ParameterID { "baseNote", 1 }, "Base Note", 0, 112, 36));
 
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "playMode", 1 }, "Play Mode",
                                                         StringArray { "One-Shot", "Gate" }, 0));
 
+    // Cue   : a pad plays from its cue to the end of the file; pressing any pad cuts the others (DJ-style cues)
+    // Slice : a pad plays from its cue to the next cue; different pads can overlap (drum-style slices)
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "padMode", 1 }, "Pad Mode",
+                                                        StringArray { "Cue", "Slice" }, 0));
+
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "fadeMs", 1 }, "Fade",
                                                        NormalisableRange<float> (0.5f, 20.0f, 0.1f), 2.0f,
                                                        AudioParameterFloatAttributes().withLabel ("ms")));
-
-    // What happens when the same key is hit again while its sound is still playing
-    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "retrigger", 1 }, "Retrigger",
-                                                        StringArray { "Cut", "Layer" }, 0));
     return layout;
 }
 
 CutbenchProcessor::CutbenchProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
-    for (size_t i = 0; i < (size_t) kMaxSlices; ++i)
+    for (size_t i = 0; i < (size_t) kNumPads; ++i)
     {
-        sliceStart[i].store (0);
-        sliceEnd[i].store (0);
+        padStart[i].store (-1);
+        padEnd[i].store (-1);
     }
 
     formatManager.registerBasicFormats();
@@ -45,8 +46,8 @@ CutbenchProcessor::CutbenchProcessor()
     gainParam     = apvts.getRawParameterValue ("gain");
     baseNoteParam = apvts.getRawParameterValue ("baseNote");
     playModeParam = apvts.getRawParameterValue ("playMode");
+    padModeParam  = apvts.getRawParameterValue ("padMode");
     fadeParam     = apvts.getRawParameterValue ("fadeMs");
-    retriggerParam = apvts.getRawParameterValue ("retrigger");
 }
 
 CutbenchProcessor::~CutbenchProcessor()
@@ -99,13 +100,14 @@ void CutbenchProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     fadeSamples = juce::jmax (1.0f, fadeParam->load() * 0.001f * (float) currentSampleRate);
     gateMode    = playModeParam->load() > 0.5f;
-    retriggerCut = retriggerParam->load() < 0.5f;
+    sliceMode   = padModeParam->load() > 0.5f;
     baseNote    = juce::roundToInt (baseNoteParam->load());
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainParam->load(), -60.0f));
 
     drainCommands();
 
-    // Sample-accurate MIDI: render up to each event, then apply it.
+    // Sample-accurate MIDI: render up to each event, then apply it. This is also what makes live
+    // chopping exact: the play position of the running voice is read at the very sample of the key press.
     int pos = 0;
     for (const auto metadata : midi)
     {
@@ -135,40 +137,35 @@ void CutbenchProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         buffer.applyGain (gainSmoothed.getTargetValue());
     }
 
-    // Report the newest voice's position to the UI
+    // Status for the UI: newest voice position + which pads are sounding
     juce::int64 ph = -1;
     juce::uint64 newest = 0;
+    juce::uint32 mask = 0;
     for (const auto& v : voices)
-        if (v.active && v.age >= newest)
+    {
+        if (! v.active)
+            continue;
+        if (v.age >= newest)
         {
             newest = v.age;
             ph = (juce::int64) v.pos;
         }
+        if (! v.preview && ! v.releasing && v.pad >= 0)
+            mask |= (juce::uint32) 1 << v.pad;
+    }
     playhead.store (ph, std::memory_order_relaxed);
+    activePadMask.store (mask, std::memory_order_relaxed);
 }
 
 void CutbenchProcessor::handleMidi (const juce::MidiMessage& m)
 {
     if (m.isNoteOn())
     {
-        juce::int64 s = 0, e = 0;
-        if (getSliceRange (m.getNoteNumber() - baseNote, s, e))
-        {
-            if (retriggerCut)   // fade out earlier hits of this key instead of stacking them
-                for (auto& v : voices)
-                    if (v.active && ! v.preview && v.note == m.getNoteNumber())
-                        v.releasing = true;
-
-            startVoice (m.getNoteNumber(), s, e, m.getFloatVelocity(), false);
-        }
+        padOn (m.getNoteNumber() - baseNote, m.getFloatVelocity());
     }
     else if (m.isNoteOff())
     {
-        // One-Shot ignores note-off; Gate releases the voices of that note.
-        if (gateMode)
-            for (auto& v : voices)
-                if (v.active && ! v.preview && v.note == m.getNoteNumber())
-                    v.releasing = true;
+        padOff (m.getNoteNumber() - baseNote);
     }
     else if (m.isAllNotesOff() || m.isAllSoundOff())
     {
@@ -178,19 +175,82 @@ void CutbenchProcessor::handleMidi (const juce::MidiMessage& m)
     }
 }
 
-bool CutbenchProcessor::getSliceRange (int index, juce::int64& start, juce::int64& end) const
+juce::int64 CutbenchProcessor::resolveEnd (int pad, bool slice, juce::int64 length) const
 {
-    if (activeSample == nullptr || index < 0 || index >= sliceCount.load (std::memory_order_acquire))
-        return false;
+    const juce::int64 start = padStart[(size_t) pad].load (std::memory_order_relaxed);
+    const juce::int64 explicitEnd = padEnd[(size_t) pad].load (std::memory_order_relaxed);
 
-    // The UI may be mid-update, so every value is validated before use.
-    const juce::int64 total = activeSample->numFrames();
-    start = juce::jlimit<juce::int64> (0, total, sliceStart[(size_t) index].load (std::memory_order_relaxed));
-    end   = juce::jlimit<juce::int64> (0, total, sliceEnd[(size_t) index].load (std::memory_order_relaxed));
-    return end - start >= 2;
+    if (explicitEnd > start)
+        return juce::jmin (explicitEnd, length);
+
+    if (slice)   // up to the next cue point
+    {
+        juce::int64 next = length;
+        for (size_t i = 0; i < (size_t) kNumPads; ++i)
+        {
+            if ((int) i == pad)
+                continue;
+            const juce::int64 s = padStart[i].load (std::memory_order_relaxed);
+            if (s > start && s < next)
+                next = s;
+        }
+        return next;
+    }
+
+    return length;
 }
 
-void CutbenchProcessor::startVoice (int note, juce::int64 start, juce::int64 end, float velocity, bool preview)
+void CutbenchProcessor::padOn (int pad, float velocity)
+{
+    if (activeSample == nullptr || pad < 0 || pad >= kNumPads)
+        return;
+
+    const juce::int64 length = activeSample->numFrames();
+    const juce::int64 start = padStart[(size_t) pad].load (std::memory_order_relaxed);
+
+    if (start < 0)
+    {
+        // LIVE CHOP: an empty pad grabs the position of whatever is playing right now.
+        // Nothing is retriggered, playback just carries on.
+        const Voice* reference = nullptr;
+        for (const auto& v : voices)
+            if (v.active && ! v.releasing && (reference == nullptr || v.age > reference->age))
+                reference = &v;
+
+        if (reference != nullptr)
+        {
+            padStart[(size_t) pad].store (juce::jlimit<juce::int64> (0, length - 1, (juce::int64) reference->pos),
+                                          std::memory_order_relaxed);
+            padEnd[(size_t) pad].store (-1, std::memory_order_relaxed);
+            bumpPadVersion();
+        }
+        return;
+    }
+
+    // Pad with a cue: jump there. The source playback is always replaced; in Cue mode every other voice is
+    // cut as well, in Slice mode only an earlier hit of the same pad.
+    const juce::int64 end = resolveEnd (pad, sliceMode, length);
+    if (end - start < 2)
+        return;
+
+    for (auto& v : voices)
+        if (v.active && (v.preview || ! sliceMode || v.pad == pad))
+            v.releasing = true;
+
+    startVoice (pad, start, end, velocity, false);
+}
+
+void CutbenchProcessor::padOff (int pad)
+{
+    if (! gateMode)   // One-Shot ignores key release
+        return;
+
+    for (auto& v : voices)
+        if (v.active && ! v.preview && v.pad == pad)
+            v.releasing = true;
+}
+
+void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end, float velocity, bool preview)
 {
     if (activeSample == nullptr)
         return;
@@ -221,7 +281,7 @@ void CutbenchProcessor::startVoice (int note, juce::int64 start, juce::int64 end
     *slot = Voice {};
     slot->active  = true;
     slot->preview = preview;
-    slot->note    = note;
+    slot->pad     = pad;
     slot->pos     = (double) start;
     slot->end     = end;
     slot->gain    = juce::jlimit (0.0f, 1.0f, velocity);
@@ -266,7 +326,7 @@ void CutbenchProcessor::renderVoices (juce::AudioBuffer<float>& out, int startSa
             const juce::int64 idx2 = juce::jmin (idx + 1, lastFrame);
             const float frac = (float) (v.pos - (double) idx);
 
-            // Fade out the tail of the slice so boundaries never click
+            // Fade out the tail so the end of a region never clicks
             const float remaining = (float) ((double) v.end - v.pos);
             const float tail = remaining >= fadeSamples ? 1.0f : juce::jmax (0.0f, remaining / fadeSamples);
             const float g = v.gain * v.env * tail;
@@ -304,16 +364,9 @@ void CutbenchProcessor::drainCommands()
     {
         switch (c.type)
         {
-            case Command::Type::playSlice:
-            {
-                juce::int64 s = 0, e = 0;
-                if (getSliceRange (c.slice, s, e))
-                    startVoice (-1, s, e, 1.0f, true);
-                break;
-            }
-            case Command::Type::playRegion:
-                startVoice (-1, c.start, c.end, 1.0f, true);
-                break;
+            case Command::Type::padOn:      padOn (c.pad, 1.0f); break;
+            case Command::Type::padOff:     padOff (c.pad); break;
+            case Command::Type::playRegion: startVoice (-1, c.start, c.end, 1.0f, true); break;
             case Command::Type::stopAll:
                 for (auto& v : voices)
                     if (v.active)
@@ -328,13 +381,21 @@ void CutbenchProcessor::drainCommands()
 }
 
 //==============================================================================
-// Preview API (message thread -> audio thread)
+// Play controls (message thread -> audio thread)
 //==============================================================================
-void CutbenchProcessor::previewSlice (int index)
+void CutbenchProcessor::padPressed (int pad)
 {
     Command c;
-    c.type = Command::Type::playSlice;
-    c.slice = index;
+    c.type = Command::Type::padOn;
+    c.pad = pad;
+    pushCommand (c);
+}
+
+void CutbenchProcessor::padReleased (int pad)
+{
+    Command c;
+    c.type = Command::Type::padOff;
+    c.pad = pad;
     pushCommand (c);
 }
 
@@ -362,7 +423,7 @@ void CutbenchProcessor::loadFile (const juce::File& file)
     loadFileInternal (file, std::nullopt);
 }
 
-void CutbenchProcessor::loadFileInternal (const juce::File& file, std::optional<std::vector<Slice>> restore)
+void CutbenchProcessor::loadFileInternal (const juce::File& file, std::optional<PadArray> restore)
 {
     const auto generation = ++loadGeneration;
     setStatus ("Loading " + file.getFileName() + " ...");
@@ -398,7 +459,7 @@ void CutbenchProcessor::decodeFile (const juce::File& file, std::shared_ptr<Samp
         const int channels = juce::jlimit (1, 2, (int) reader->numChannels);
         constexpr juce::int64 maxBytes = 1LL << 30;   // keep the in-memory copy under ~1 GiB
 
-        if (frames <= kMinSliceLength || reader->sampleRate <= 0.0)
+        if (frames <= kMinRegionLength || reader->sampleRate <= 0.0)
         {
             error = "\"" + file.getFileName() + "\" is empty or too short";
             return;
@@ -430,7 +491,7 @@ void CutbenchProcessor::decodeFile (const juce::File& file, std::shared_ptr<Samp
 }
 
 void CutbenchProcessor::finishLoad (std::shared_ptr<SampleData> data, juce::String error,
-                                    std::optional<std::vector<Slice>> restore, juce::uint32 generation)
+                                    std::optional<PadArray> restore, juce::uint32 generation)
 {
     if (generation != loadGeneration)
         return;   // a newer load superseded this one
@@ -444,34 +505,45 @@ void CutbenchProcessor::finishLoad (std::shared_ptr<SampleData> data, juce::Stri
 
     const juce::int64 len = data->numFrames();
 
-    std::vector<Slice> clean;
+    // Validate restored pads against the real file length
+    PadArray clean;
+    bool any = false;
     if (restore.has_value())
-        for (auto s : *restore)
+        for (size_t i = 0; i < (size_t) kNumPads; ++i)
         {
-            s.start = juce::jlimit<juce::int64> (0, len, s.start);
-            s.end   = juce::jlimit<juce::int64> (0, len, s.end);
-            if (s.end - s.start >= kMinSliceLength && (int) clean.size() < kMaxSlices)
-                clean.push_back (s);
+            const Pad p = (*restore)[i];
+            if (p.start >= 0 && p.start < len - kMinRegionLength)
+            {
+                clean[i].start = p.start;
+                if (p.end > p.start + kMinRegionLength && p.end <= len)
+                    clean[i].end = p.end;
+                any = true;
+            }
         }
-    if (clean.empty())
-        clean.push_back ({ 0, len });
+    if (! any)
+        clean[0].start = 0;   // fresh load: pad 1 plays the sample from the beginning
 
     {
         const juce::ScopedLock sl (modelLock);
 
-        sliceCount.store (0, std::memory_order_release);
         if (currentSample != nullptr)
             graveyard.push_back ({ currentSample, juce::Time::getMillisecondCounter() });
 
         currentSample = data;
         samplePath = data->file.getFullPathName();
-        slices = std::move (clean);
-        selectedSlice = 0;
         statusText = {};
 
+        for (size_t i = 0; i < (size_t) kNumPads; ++i)
+        {
+            padStart[i].store (clean[i].start, std::memory_order_relaxed);
+            padEnd[i].store (clean[i].end, std::memory_order_relaxed);
+        }
         audioSample.store (data.get(), std::memory_order_release);
-        publishSlices();
     }
+
+    const int firstEmpty = nextEmptyPad (-1);
+    selectedPad.store (firstEmpty >= 0 ? firstEmpty : 0);
+    bumpPadVersion();
 
     // Free replaced samples once the audio thread has certainly moved on.
     juce::WeakReference<CutbenchProcessor> weak (this);
@@ -492,17 +564,6 @@ void CutbenchProcessor::purgeGraveyard()
 //==============================================================================
 // Model access (message thread)
 //==============================================================================
-void CutbenchProcessor::publishSlices()
-{
-    const int n = (int) slices.size();
-    for (int i = 0; i < n; ++i)
-    {
-        sliceStart[(size_t) i].store (slices[(size_t) i].start, std::memory_order_relaxed);
-        sliceEnd[(size_t) i].store (slices[(size_t) i].end, std::memory_order_relaxed);
-    }
-    sliceCount.store (n, std::memory_order_release);
-}
-
 void CutbenchProcessor::setStatus (const juce::String& s)
 {
     {
@@ -524,172 +585,153 @@ std::shared_ptr<const SampleData> CutbenchProcessor::getSample() const
     return currentSample;
 }
 
-std::vector<Slice> CutbenchProcessor::getSlices() const
+juce::int64 CutbenchProcessor::currentLength() const
 {
     const juce::ScopedLock sl (modelLock);
-    return slices;
+    return currentSample != nullptr ? (juce::int64) currentSample->numFrames() : 0;
 }
 
-int CutbenchProcessor::getSelectedSlice() const
+CutbenchProcessor::PadArray CutbenchProcessor::getPads() const
 {
-    const juce::ScopedLock sl (modelLock);
-    return selectedSlice;
-}
-
-void CutbenchProcessor::setSelectedSlice (int index)
-{
+    PadArray out;
+    for (size_t i = 0; i < (size_t) kNumPads; ++i)
     {
-        const juce::ScopedLock sl (modelLock);
-        selectedSlice = juce::jlimit (-1, (int) slices.size() - 1, index);
+        out[i].start = padStart[i].load (std::memory_order_relaxed);
+        out[i].end   = padEnd[i].load (std::memory_order_relaxed);
     }
-    sendChangeMessage();
+    return out;
 }
 
-int CutbenchProcessor::addSlice (juce::int64 start, juce::int64 end)
+void CutbenchProcessor::setSelectedPad (int pad)
 {
-    int result = -1;
+    selectedPad.store (juce::jlimit (0, kNumPads - 1, pad));
+    bumpPadVersion();
+}
+
+void CutbenchProcessor::setPadStart (int pad, juce::int64 position)
+{
+    const juce::int64 len = currentLength();
+    if (len <= kMinRegionLength || pad < 0 || pad >= kNumPads)
+        return;
+
+    padStart[(size_t) pad].store (juce::jlimit<juce::int64> (0, len - kMinRegionLength, position));
+    padEnd[(size_t) pad].store (-1);
+    bumpPadVersion();
+}
+
+void CutbenchProcessor::setPadRegion (int pad, juce::int64 start, juce::int64 end)
+{
+    const juce::int64 len = currentLength();
+    if (len <= kMinRegionLength || pad < 0 || pad >= kNumPads)
+        return;
+
+    start = juce::jlimit<juce::int64> (0, len, start);
+    end   = juce::jlimit<juce::int64> (0, len, end);
+    if (end - start < kMinRegionLength)
+        return;
+
+    padStart[(size_t) pad].store (start);
+    padEnd[(size_t) pad].store (end);
+    bumpPadVersion();
+}
+
+void CutbenchProcessor::clearPad (int pad)
+{
+    if (pad < 0 || pad >= kNumPads)
+        return;
+
+    padStart[(size_t) pad].store (-1);
+    padEnd[(size_t) pad].store (-1);
+    bumpPadVersion();
+}
+
+void CutbenchProcessor::clearAllPads()
+{
+    for (size_t i = 0; i < (size_t) kNumPads; ++i)
     {
-        const juce::ScopedLock sl (modelLock);
-        if (currentSample == nullptr || (int) slices.size() >= kMaxSlices)
-            return -1;
-
-        const juce::int64 len = currentSample->numFrames();
-        start = juce::jlimit<juce::int64> (0, len, start);
-        end   = juce::jlimit<juce::int64> (0, len, end);
-        if (end - start < kMinSliceLength)
-            return -1;
-
-        // The untouched default slice (whole file) gives way to the first slice the user creates,
-        // otherwise slice 1 / the base note would keep playing the entire file.
-        if (slices.size() == 1 && slices[0].start == 0 && slices[0].end == len)
-            slices.clear();
-
-        auto it = std::upper_bound (slices.begin(), slices.end(), start,
-                                    [] (juce::int64 v, const Slice& s) { return v < s.start; });
-        result = (int) (it - slices.begin());
-        slices.insert (it, Slice { start, end });
-        selectedSlice = result;
-        publishSlices();
+        padStart[i].store (-1);
+        padEnd[i].store (-1);
     }
-    sendChangeMessage();
-    return result;
+    bumpPadVersion();
 }
 
-bool CutbenchProcessor::splitAt (juce::int64 position)
+void CutbenchProcessor::chopEqual (int numPads)
 {
-    bool done = false;
-    {
-        const juce::ScopedLock sl (modelLock);
-        if (currentSample == nullptr || (int) slices.size() >= kMaxSlices)
-            return false;
+    const juce::int64 len = currentLength();
+    if (len <= kMinRegionLength)
+        return;
 
-        for (size_t i = 0; i < slices.size(); ++i)
+    const int n = juce::jlimit (1, kNumPads, numPads);
+    for (int i = 0; i < kNumPads; ++i)
+    {
+        if (i < n)
         {
-            const Slice s = slices[i];
-            if (position >= s.start + kMinSliceLength && position <= s.end - kMinSliceLength)
-            {
-                slices[i].end = position;
-                slices.insert (slices.begin() + (std::ptrdiff_t) i + 1, Slice { position, s.end });
-                selectedSlice = (int) i + 1;
-                done = true;
-                break;
-            }
+            padStart[(size_t) i].store ((len * i) / n);
+            padEnd[(size_t) i].store ((len * (i + 1)) / n);
         }
-        if (done)
-            publishSlices();
-    }
-    if (done)
-        sendChangeMessage();
-    return done;
-}
-
-void CutbenchProcessor::removeSlice (int index)
-{
-    bool done = false;
-    {
-        const juce::ScopedLock sl (modelLock);
-        if (index >= 0 && index < (int) slices.size())
+        else
         {
-            slices.erase (slices.begin() + index);
-            selectedSlice = juce::jmin (selectedSlice, (int) slices.size() - 1);
-            publishSlices();
-            done = true;
+            padStart[(size_t) i].store (-1);
+            padEnd[(size_t) i].store (-1);
         }
     }
-    if (done)
-        sendChangeMessage();
+    selectedPad.store (juce::jmin (n, kNumPads - 1));
+    bumpPadVersion();
 }
 
-void CutbenchProcessor::resetSlices()
+juce::int64 CutbenchProcessor::movePadStart (int pad, juce::int64 newPosition)
 {
-    {
-        const juce::ScopedLock sl (modelLock);
-        if (currentSample == nullptr)
-            return;
-        slices.assign (1, Slice { 0, (juce::int64) currentSample->numFrames() });
-        selectedSlice = 0;
-        publishSlices();
-    }
-    sendChangeMessage();
-}
+    const juce::int64 len = currentLength();
+    if (len <= kMinRegionLength || pad < 0 || pad >= kNumPads)
+        return -1;
 
-void CutbenchProcessor::chopEqual (int numSlices)
-{
-    {
-        const juce::ScopedLock sl (modelLock);
-        if (currentSample == nullptr)
-            return;
+    const juce::int64 old = padStart[(size_t) pad].load();
+    if (old < 0)
+        return old;
 
-        const juce::int64 len = currentSample->numFrames();
-        const int n = juce::jlimit (1, kMaxSlices, numSlices);
+    juce::int64 lo = 0;
+    juce::int64 hi = len - kMinRegionLength;
 
-        slices.clear();
-        for (int i = 0; i < n; ++i)
-        {
-            const juce::int64 s = (len * i) / n;
-            const juce::int64 e = (len * (i + 1)) / n;
-            if (e - s >= kMinSliceLength)
-                slices.push_back ({ s, e });
-        }
-        if (slices.empty())
-            slices.push_back ({ 0, len });
+    const juce::int64 ownEnd = padEnd[(size_t) pad].load();
+    if (ownEnd > old)
+        hi = juce::jmin (hi, ownEnd - kMinRegionLength);
 
-        selectedSlice = 0;
-        publishSlices();
-    }
-    sendChangeMessage();
-}
+    // Pads whose region ends exactly at this cue move their end along (shared boundary)
+    for (int i = 0; i < kNumPads; ++i)
+        if (i != pad && padStart[(size_t) i].load() >= 0 && padEnd[(size_t) i].load() == old)
+            lo = juce::jmax (lo, padStart[(size_t) i].load() + kMinRegionLength);
 
-juce::int64 CutbenchProcessor::moveBoundary (juce::int64 oldPos, juce::int64 newPos)
-{
-    juce::int64 applied = oldPos;
-    {
-        const juce::ScopedLock sl (modelLock);
-        if (currentSample == nullptr)
-            return oldPos;
+    if (lo > hi)
+        return old;
 
-        juce::int64 lo = 0, hi = currentSample->numFrames();
+    const juce::int64 applied = juce::jlimit (lo, hi, newPosition);
+    padStart[(size_t) pad].store (applied);
 
-        // Every slice that touches this boundary constrains how far it can move.
-        for (const auto& s : slices)
-        {
-            if (s.start == oldPos) hi = juce::jmin (hi, s.end - kMinSliceLength);
-            if (s.end   == oldPos) lo = juce::jmax (lo, s.start + kMinSliceLength);
-        }
+    for (int i = 0; i < kNumPads; ++i)
+        if (i != pad && padStart[(size_t) i].load() >= 0 && padEnd[(size_t) i].load() == old)
+            padEnd[(size_t) i].store (applied);
 
-        if (lo <= hi)
-        {
-            applied = juce::jlimit (lo, hi, newPos);
-            for (auto& s : slices)
-            {
-                if (s.start == oldPos) s.start = applied;
-                else if (s.end == oldPos) s.end = applied;
-            }
-            publishSlices();
-        }
-    }
-    sendChangeMessage();
+    bumpPadVersion();
     return applied;
+}
+
+juce::int64 CutbenchProcessor::getEffectiveEnd (int pad) const
+{
+    const juce::int64 len = currentLength();
+    if (pad < 0 || pad >= kNumPads || len <= 0 || padStart[(size_t) pad].load() < 0)
+        return -1;
+    return resolveEnd (pad, isSliceMode(), len);
+}
+
+int CutbenchProcessor::nextEmptyPad (int after) const
+{
+    for (int i = 1; i <= kNumPads; ++i)
+    {
+        const int idx = (((after + i) % kNumPads) + kNumPads) % kNumPads;
+        if (padStart[(size_t) idx].load() < 0)
+            return idx;
+    }
+    return -1;
 }
 
 //==============================================================================
@@ -704,13 +746,19 @@ void CutbenchProcessor::getStateInformation (juce::MemoryBlock& dest)
     {
         const juce::ScopedLock sl (modelLock);
         sample.setProperty ("path", samplePath, nullptr);
-        for (const auto& s : slices)
-        {
-            juce::ValueTree n ("SLICE");
-            n.setProperty ("start", (juce::int64) s.start, nullptr);
-            n.setProperty ("end",   (juce::int64) s.end, nullptr);
-            sample.appendChild (n, nullptr);
-        }
+    }
+
+    const auto pads = getPads();
+    for (int i = 0; i < kNumPads; ++i)
+    {
+        if (! pads[(size_t) i].isSet())
+            continue;
+
+        juce::ValueTree n ("PAD");
+        n.setProperty ("index", i, nullptr);
+        n.setProperty ("start", (juce::int64) pads[(size_t) i].start, nullptr);
+        n.setProperty ("end",   (juce::int64) pads[(size_t) i].end, nullptr);
+        sample.appendChild (n, nullptr);
     }
     state.appendChild (sample, nullptr);
 
@@ -736,11 +784,16 @@ void CutbenchProcessor::setStateInformation (const void* data, int sizeInBytes)
 
     const juce::String path = node["path"].toString();
 
-    std::vector<Slice> restored;
+    PadArray restored;
     for (int i = 0; i < node.getNumChildren(); ++i)
     {
         const auto c = node.getChild (i);
-        restored.push_back ({ (juce::int64) c["start"], (juce::int64) c["end"] });
+        const int index = (int) c["index"];
+        if (index >= 0 && index < kNumPads)
+        {
+            restored[(size_t) index].start = (juce::int64) c["start"];
+            restored[(size_t) index].end   = (juce::int64) c["end"];
+        }
     }
 
     if (path.isEmpty())
@@ -755,9 +808,14 @@ void CutbenchProcessor::setStateInformation (const void* data, int sizeInBytes)
     {
         {
             const juce::ScopedLock sl (modelLock);
-            samplePath = path;          // keep the data so re-saving the project doesn't lose it
-            slices = restored;
+            samplePath = path;      // keep the data so re-saving the project doesn't lose it
         }
+        for (size_t i = 0; i < (size_t) kNumPads; ++i)
+        {
+            padStart[i].store (restored[i].start);
+            padEnd[i].store (restored[i].end);
+        }
+        bumpPadVersion();
         setStatus ("Sample file not found: " + path);
     }
 }

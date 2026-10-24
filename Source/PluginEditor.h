@@ -4,6 +4,7 @@
 #include "PluginProcessor.h"
 #include "Theme.h"
 #include "WaveformView.h"
+#include "PadGrid.h"
 
 class CutbenchEditor : public juce::AudioProcessorEditor,
                        private juce::ChangeListener,
@@ -31,19 +32,20 @@ private:
     CutbenchLookAndFeel lnf;   // declared first so it outlives every component using it
 
     WaveformView waveform;
+    PadGrid padGrid;
 
     juce::TextButton loadButton { "Load..." }, playButton { "Play" }, stopButton { "Stop" },
-                     addButton { "Add Slice" }, splitButton { "Split" },
-                     deleteButton { "Delete" }, resetButton { "Reset" }, chopButton { "Chop Equal" },
+                     setPadButton { "Set Pad" }, clearPadButton { "Clear Pad" }, clearAllButton { "Clear All" },
+                     chopButton { "Chop Equal" },
                      zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" };
 
     juce::Label fileLabel, infoLabel, statusLabel, hintLabel;
-    juce::Label gainLabel, noteLabel, modeLabel, retriggerLabel, fadeLabel;
+    juce::Label gainLabel, noteLabel, modeLabel, padModeLabel, fadeLabel;
     juce::Slider gainSlider, noteSlider, fadeSlider, chopCountSlider;
-    juce::ComboBox modeBox, retriggerBox;
+    juce::ComboBox modeBox, padModeBox;
 
     std::unique_ptr<SliderAttachment> gainAttachment, noteAttachment, fadeAttachment;
-    std::unique_ptr<ComboBoxAttachment> modeAttachment, retriggerAttachment;
+    std::unique_ptr<ComboBoxAttachment> modeAttachment, padModeAttachment;
 
     juce::Rectangle<int> controlsArea;
     std::unique_ptr<juce::FileChooser> chooser;

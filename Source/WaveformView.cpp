@@ -16,6 +16,7 @@ WaveformView::WaveformView (CutbenchProcessor& p) : proc (p)
     hbar.addListener (this);
     addAndMakeVisible (hbar);
 
+    refreshPads();
     startTimerHz (30);
 }
 
@@ -28,14 +29,21 @@ WaveformView::~WaveformView()
 //==============================================================================
 // Model sync
 //==============================================================================
+void WaveformView::refreshPads()
+{
+    const auto version = proc.getPadVersion();   // read first, so a change during the snapshot is caught next tick
+    pads = proc.getPads();
+    selectedPad = proc.getSelectedPad();
+    seenPadVersion = version;
+    seenSliceMode = proc.isSliceMode();
+}
+
 void WaveformView::modelChanged()
 {
     auto s = proc.getSample();
     const bool newSample = (s != data);
-
     data = std::move (s);
-    slices = proc.getSlices();
-    selectedSlice = proc.getSelectedSlice();
+    refreshPads();
 
     if (newSample)
     {
@@ -58,17 +66,52 @@ std::optional<std::pair<juce::int64, juce::int64>> WaveformView::getSelection() 
 
 void WaveformView::timerCallback()
 {
+    bool needsRepaint = false;
+
     const auto ph = proc.getPlayhead();
     if (ph != lastPlayhead)
     {
         lastPlayhead = ph;
-        repaint();
+        needsRepaint = true;
     }
+
+    // Pads can also change on the audio thread (live chop), so poll the version.
+    if (proc.getPadVersion() != seenPadVersion || proc.isSliceMode() != seenSliceMode)
+    {
+        refreshPads();
+        needsRepaint = true;
+    }
+
+    if (needsRepaint)
+        repaint();
 }
 
 //==============================================================================
-// Playback requests
+// Pad assignment / playback requests
 //==============================================================================
+void WaveformView::advanceSelection()
+{
+    const int next = proc.nextEmptyPad (proc.getSelectedPad());
+    if (next >= 0)
+        proc.setSelectedPad (next);
+}
+
+void WaveformView::assignToSelectedPad()
+{
+    if (data == nullptr)
+        return;
+
+    const int pad = proc.getSelectedPad();
+    if (auto sel = getSelection())
+        proc.setPadRegion (pad, sel->first, sel->second);   // region: plays exactly this part
+    else
+        proc.setPadStart (pad, cursor);                     // cue point at the cursor
+
+    advanceSelection();
+    refreshPads();
+    repaint();
+}
+
 void WaveformView::play()
 {
     if (data == nullptr)
@@ -146,7 +189,7 @@ void WaveformView::zoomAround (float x, double factor)
     fitted = false;
     const double anchor = xToSample (x);
     samplesPerPixel *= factor;
-    clampView();                                    // clamps samplesPerPixel first ...
+    clampView();                                         // clamps samplesPerPixel first ...
     viewStart = anchor - (double) x * samplesPerPixel;   // ... then re-anchors under the pointer
     clampView();
     updateScrollBar();
@@ -189,29 +232,38 @@ void WaveformView::resized()
 //==============================================================================
 // Hit testing
 //==============================================================================
-int WaveformView::sliceAt (juce::int64 position) const
+int WaveformView::hitMarker (float x) const
 {
-    for (size_t i = 0; i < slices.size(); ++i)
-        if (position >= slices[i].start && position < slices[i].end)
-            return (int) i;
-    return -1;
-}
-
-std::optional<juce::int64> WaveformView::hitBoundary (float x) const
-{
-    std::optional<juce::int64> best;
+    int best = -1;
     float bestDistance = kEdgeGrabPixels;
 
-    for (const auto& s : slices)
-        for (const juce::int64 pos : { s.start, s.end })
+    for (int i = 0; i < kNumPads; ++i)
+    {
+        if (! pads[(size_t) i].isSet())
+            continue;
+
+        const float d = std::abs (sampleToX ((double) pads[(size_t) i].start) - x);
+        if (d <= bestDistance)
         {
-            const float d = std::abs (sampleToX ((double) pos) - x);
-            if (d <= bestDistance)
-            {
-                bestDistance = d;
-                best = pos;
-            }
+            bestDistance = d;
+            best = i;
         }
+    }
+    return best;
+}
+
+int WaveformView::flagAt (float x) const
+{
+    int best = -1;   // later flags are drawn on top, so the last match wins
+    for (int i = 0; i < kNumPads; ++i)
+    {
+        if (! pads[(size_t) i].isSet())
+            continue;
+
+        const float mx = sampleToX ((double) pads[(size_t) i].start);
+        if (x >= mx && x <= mx + kFlagWidth)
+            best = i;
+    }
     return best;
 }
 
@@ -242,6 +294,32 @@ void WaveformView::drawWaveform (juce::Graphics& g, juce::Rectangle<int> body) c
     }
 }
 
+void WaveformView::drawPadMarker (juce::Graphics& g, juce::Rectangle<int> area, int pad, int baseNote) const
+{
+    const float w = (float) area.getWidth();
+    const float x = sampleToX ((double) pads[(size_t) pad].start);
+    if (x < -kFlagWidth || x > w)
+        return;
+
+    const auto colour = Theme::padColour (pad);
+    const bool selected = (pad == selectedPad);
+
+    g.setColour (colour.withAlpha (selected ? 1.0f : 0.8f));
+    g.drawLine (x, (float) area.getY(), x, (float) area.getBottom(), selected ? 2.0f : 1.0f);
+
+    const juce::Rectangle<float> flag (x, (float) area.getY(), kFlagWidth, (float) kStripHeight - 1.0f);
+    g.setColour (colour.withAlpha (selected ? 1.0f : 0.65f));
+    g.fillRect (flag);
+
+    juce::String label (pad + 1);
+    const int note = baseNote + pad;
+    if (note >= 0 && note <= 127)
+        label += "  " + juce::MidiMessage::getMidiNoteName (note, true, true, 3);
+
+    g.setColour (juce::Colours::black.withAlpha (0.85f));
+    g.drawText (label, flag.reduced (4.0f, 0.0f), juce::Justification::centredLeft, false);
+}
+
 void WaveformView::paint (juce::Graphics& g)
 {
     g.fillAll (Theme::waveBg);
@@ -261,16 +339,17 @@ void WaveformView::paint (juce::Graphics& g)
     g.setColour (Theme::grid);
     g.drawHorizontalLine (body.getCentreY(), 0.0f, w);
 
-    // Slice tints
-    for (size_t i = 0; i < slices.size(); ++i)
+    // Region of the selected pad (from its cue to where it will stop)
+    if (selectedPad >= 0 && pads[(size_t) selectedPad].isSet())
     {
-        const float x0 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) slices[i].start));
-        const float x1 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) slices[i].end));
-        if (x1 <= x0)
-            continue;
-
-        g.setColour (Theme::sliceColour ((int) i).withAlpha ((int) i == selectedSlice ? 0.22f : 0.09f));
-        g.fillRect (x0, (float) body.getY(), x1 - x0, (float) body.getHeight());
+        const juce::int64 end = proc.getEffectiveEnd (selectedPad);
+        if (end > pads[(size_t) selectedPad].start)
+        {
+            const float x0 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) pads[(size_t) selectedPad].start));
+            const float x1 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) end));
+            g.setColour (Theme::padColour (selectedPad).withAlpha (0.14f));
+            g.fillRect (x0, (float) body.getY(), juce::jmax (0.0f, x1 - x0), (float) body.getHeight());
+        }
     }
 
     drawWaveform (g, body);
@@ -284,40 +363,14 @@ void WaveformView::paint (juce::Graphics& g)
         g.fillRect (x0, (float) area.getY(), x1 - x0, (float) area.getHeight());
     }
 
-    // Slice strip with numbers (and the MIDI key that plays each slice), then boundary lines
-    const int baseNote = juce::roundToInt (proc.apvts.getRawParameterValue ("baseNote")->load());
+    // Pad markers; the selected one is drawn last so it stays on top
     g.setFont (11.0f);
-    for (size_t i = 0; i < slices.size(); ++i)
-    {
-        const auto colour = Theme::sliceColour ((int) i);
-        const float rx0 = sampleToX ((double) slices[i].start);
-        const float rx1 = sampleToX ((double) slices[i].end);
-        const float x0 = juce::jlimit (0.0f, w, rx0);
-        const float x1 = juce::jlimit (0.0f, w, rx1);
-
-        if (x1 > x0)
-        {
-            const juce::Rectangle<float> strip (x0, (float) area.getY(), x1 - x0, (float) kStripHeight - 1.0f);
-            g.setColour (colour.withAlpha ((int) i == selectedSlice ? 0.95f : 0.55f));
-            g.fillRect (strip);
-
-            if (strip.getWidth() > 16.0f)
-            {
-                g.setColour (juce::Colours::black.withAlpha (0.85f));
-                juce::String label (juce::String ((int) i + 1));
-                const int note = baseNote + (int) i;
-                if (strip.getWidth() > 48.0f && note <= 127)
-                    label += "   " + juce::MidiMessage::getMidiNoteName (note, true, true, 3);
-
-                g.drawText (label, strip.reduced (4.0f, 0.0f), juce::Justification::centredLeft, false);
-            }
-        }
-
-        g.setColour (colour);
-        for (const float x : { rx0, rx1 })
-            if (x >= 0.0f && x <= w)
-                g.drawLine (x, (float) area.getY(), x, (float) area.getBottom(), 1.0f);
-    }
+    const int baseNote = proc.getBaseNote();
+    for (int i = 0; i < kNumPads; ++i)
+        if (pads[(size_t) i].isSet() && i != selectedPad)
+            drawPadMarker (g, area, i, baseNote);
+    if (selectedPad >= 0 && pads[(size_t) selectedPad].isSet())
+        drawPadMarker (g, area, selectedPad, baseNote);
 
     // Cursor (click position)
     const float cx = sampleToX ((double) cursor);
@@ -346,34 +399,44 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     grabKeyboardFocus();
     drag = Drag::none;
+    dragPad = -1;
     dragged = false;
 
     if (data == nullptr)
         return;
 
-    if (auto b = hitBoundary (e.position.x))
+    // 1) A marker line: grab it to move that pad's cue point
+    const int marker = hitMarker (e.position.x);
+    if (marker >= 0)
     {
-        drag = Drag::boundary;
-        boundaryPos = *b;
+        drag = Drag::marker;
+        dragPad = marker;
+        proc.setSelectedPad (marker);
+        refreshPads();
+        repaint();
         return;
     }
 
-    const auto pos = clampSample (xToSample (e.position.x));
-
-    if (e.position.y < (float) kStripHeight)    // numbered strip: select + audition
+    // 2) A flag in the top strip: select the pad and play it (released on mouse-up, for Gate mode)
+    if (e.position.y < (float) kStripHeight)
     {
-        const int idx = sliceAt (pos);
-        if (idx >= 0)
+        const int flag = flagAt (e.position.x);
+        if (flag >= 0)
         {
-            proc.setSelectedSlice (idx);
-            proc.previewSlice (idx);
+            drag = Drag::flag;
+            dragPad = flag;
+            proc.setSelectedPad (flag);
+            proc.padPressed (flag);
+            refreshPads();
+            repaint();
         }
         return;
     }
 
+    // 3) The waveform itself: set the cursor, start a region selection
     drag = Drag::select;
-    selAnchor = pos;
-    cursor = pos;
+    selAnchor = clampSample (xToSample (e.position.x));
+    cursor = selAnchor;
     selStart = selEnd = -1;
     notifyViewState();
     repaint();
@@ -386,10 +449,12 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
     const auto pos = clampSample (xToSample (e.position.x));
 
-    if (drag == Drag::boundary)
+    if (drag == Drag::marker)
     {
         dragged = true;
-        boundaryPos = proc.moveBoundary (boundaryPos, pos);
+        proc.movePadStart (dragPad, pos);
+        refreshPads();
+        repaint();
     }
     else if (drag == Drag::select)
     {
@@ -407,27 +472,28 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent&)
 {
-    if (drag == Drag::select && ! dragged && data != nullptr)
-    {
-        const int idx = sliceAt (cursor);
-        if (idx >= 0)
-            proc.setSelectedSlice (idx);
-    }
+    if (drag == Drag::flag && dragPad >= 0)
+        proc.padReleased (dragPad);
+
     drag = Drag::none;
+    dragPad = -1;
 }
 
 void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    if (data == nullptr || e.position.y < (float) kStripHeight || hitBoundary (e.position.x))
+    if (data == nullptr || e.position.y < (float) kStripHeight || hitMarker (e.position.x) >= 0)
         return;
 
-    proc.splitAt (clampSample (xToSample (e.position.x)));
+    proc.setPadStart (proc.getSelectedPad(), clampSample (xToSample (e.position.x)));
+    advanceSelection();
+    refreshPads();
+    repaint();
 }
 
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
-    const bool overEdge = data != nullptr && hitBoundary (e.position.x).has_value();
-    setMouseCursor (overEdge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    const bool overMarker = data != nullptr && hitMarker (e.position.x) >= 0;
+    setMouseCursor (overMarker ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
 }
 
 void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -463,7 +529,9 @@ bool WaveformView::keyPressed (const juce::KeyPress& key)
     }
     if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
     {
-        proc.removeSlice (proc.getSelectedSlice());
+        proc.clearPad (proc.getSelectedPad());
+        refreshPads();
+        repaint();
         return true;
     }
     return false;

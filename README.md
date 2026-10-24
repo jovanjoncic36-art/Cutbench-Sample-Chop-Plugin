@@ -1,76 +1,84 @@
-# Cutbench: sample slicer (VST3, JUCE) – Phase 1
+# Cutbench: cue-pad sampler (VST3 / AU, JUCE)
 
-Original sampler plugin for chopping long audio files into slices and playing them from MIDI.
-This is **Phase 1** of the roadmap: loading, waveform, manual slicing, playback, state recall.
-It was written without access to a compiler or JUCE, so **it has not been built or run yet**.
-Expect a few small compile fixes on the first build.
+Load a long audio file, set cue points on 16 pads (live while it plays), and play them from MIDI.
+Status: Phase 1 + the pad/live-chop part of Phase 2. Pitch, time-stretch, auto-slicing, key/BPM detection
+and export are still to come (see the end).
 
 ## Build (macOS)
 
 Requirements: Xcode command line tools, CMake >= 3.22, git (JUCE is fetched automatically).
 
 ```bash
-cmake -B build -G Xcode            # or: -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -B build -G Xcode
 cmake --build build --config Release
 ```
 
-- The VST3 is copied to `~/Library/Audio/Plug-Ins/VST3/Cutbench.vst3`, the AU to `~/Library/Audio/Plug-Ins/Components/Cutbench.component`.
-- No Mac toolchain? Push this folder to a GitHub repo and run the "Build macOS plugins" workflow (Actions tab). It produces a downloadable `Cutbench-macOS.zip` with both formats. Builds downloaded from the internet are unsigned: run `xattr -dr com.apple.quarantine <file>` on each plugin before use.
-- A standalone app is built too (`build/Cutbench_artefacts/Release/Standalone/`), handy for quick tests.
-- To use your own JUCE checkout: `-DCUTBENCH_JUCE_DIR=/path/to/JUCE`.
-- Universal binary (arm64 + x86_64), deployment target macOS 11.
-- Ableton Live: Preferences > Plug-ins > enable "Use VST3 System Folders" > Rescan. Cutbench is an *instrument*:
-  put it on a MIDI track.
+- VST3 goes to `~/Library/Audio/Plug-Ins/VST3/`, AU to `~/Library/Audio/Plug-Ins/Components/`.
+- No Mac toolchain? Push this folder to GitHub and run the "Build macOS plugins" workflow (Actions tab).
+  It produces `Cutbench-macOS.zip`. Downloaded builds are unsigned: run
+  `xattr -dr com.apple.quarantine <file>` on each plugin first.
+- Ableton Live: Preferences > Plug-ins > enable Audio Units / VST3 > Rescan. Put Cutbench on a MIDI track.
 - JUCE is dual-licensed (AGPLv3 / commercial). Check which applies before distributing.
 
-## Using it
+## How it works
+
+**Pads = cue points.** Pad *n* is played by MIDI note `Base Note + n - 1` (default base note 36 = C1, pad 1
+at the bottom-left of the grid like a Drum Rack). A fresh load puts pad 1 at the start of the file.
+
+**Live chop (the main workflow)**
+
+1. Start the sample (Play button / Space, or play pad 1 from the keyboard).
+2. While it runs, press an **empty** pad (MIDI key or click). The pad records the current play position as its
+   cue point. Playback is NOT interrupted.
+3. Press a pad that **has** a cue: playback jumps there and plays from that point. Nothing new is created.
+   To move a cue, drag its marker in the waveform; to remove it, right-click the pad (or Delete).
+
+**Pad Mode**
+- *Cue* (default): a pad plays from its cue to the end of the file. Pressing another pad cuts the previous one.
+- *Slice*: a pad plays from its cue to the next cue; different pads may overlap, an earlier hit of the same pad is cut.
+
+**Play Mode**: *One-Shot* ignores key release, *Gate* stops when the key is released.
+
+Regions: drag in the waveform to select, then **Set Pad** assigns the exact region to the selected pad (plays only
+that part, in both modes). **Chop Equal** spreads N equal regions over pads 1..N.
 
 | Action | How |
 |---|---|
-| Load audio | Load... button, or drop a file on the window (WAV, AIFF, FLAC, OGG, plus MP3/AAC via CoreAudio) |
-| Seek / set play start | Click the waveform (sets the cursor and selects the slice under it) |
-| Select a region | Drag |
-| Add slice from selection | Add Slice |
-| Chop evenly | Set the slice count, press Chop Equal (replaces all slices) |
-| Split a slice | Double-click, or Split (splits at the cursor) |
-| Adjust boundaries | Drag a slice edge (touching slices move together) |
-| Audition a slice | Click its numbered strip at the top |
-| Play / stop | Play (selection, or cursor to end) / Stop, Space |
-| Delete slice | Delete button or Delete key |
-| Zoom / scroll | Cmd/Ctrl + scroll, pinch, +/-/Fit; scroll or swipe to pan, scroll bar below |
+| Load audio | Load... button, or drop a file on the window |
+| Set play start | Click the waveform (cursor) |
+| Play / stop | Play (selection, or cursor to end) / Stop / Space |
+| Set cue at a position | Double-click it (assigns the selected pad, then selects the next empty pad) |
+| Move a cue | Drag its marker line |
+| Play a pad | Click the pad or its flag in the top strip of the waveform |
+| Clear a pad | Right-click it, Clear Pad, or Delete key; Clear All clears everything |
+| Zoom / scroll | Cmd/Ctrl + scroll, pinch, +/-/Fit; scroll or swipe to pan |
 
-**MIDI:** note `Base Note + n` plays slice `n+1`, numbered left to right (default base note 36 = C1, as in a Drum Rack).
-Velocity scales gain. *Retrigger* = Cut fades out the previous hit of the same key; Layer stacks hits. *One-Shot* plays the whole slice; *Gate* releases on note-off. Voices overlap (32 max).
-Parameters (gain, base note, play mode, fade) are host-automatable. The project saves the slice list and the
-audio file *path*; if the file has moved, Cutbench keeps the slice data and shows a "not found" message.
+The project saves parameters, the audio file *path* and the pad table. If the file has moved, Cutbench keeps the
+pad data and shows a "not found" message.
 
-## Architecture / real-time rules
+## Real-time design
 
-- **Audio thread:** no locks, no allocation, no file I/O. Reads an atomic pointer to immutable `SampleData`,
-  an atomic slice table, a lock-free command FIFO (UI previews) and APVTS atomics. Slice values are re-validated
-  on every use because the UI can update them mid-block.
-- **Loading:** decode + peak cache on a worker thread, handed to the message thread, published with one atomic store.
-  Replaced samples are kept alive ~6 s so the audio thread never reads freed memory.
-- **Declicking:** attack, release and the last N samples of every slice are faded (parameter "Fade").
-- **Sample rates:** playback converts file rate to host rate with linear interpolation. Good enough for Phase 1;
-  Phase 3 replaces this with proper resampling / pitch / time-stretch.
-- **Bad input:** unreadable, empty or oversized (> ~1 GiB in memory) files produce a status message and leave the
-  current sample untouched. Corrupt plugin state is ignored.
+- Audio thread: no locks, no allocation, no file I/O. The pad table is a set of atomics that both the audio
+  thread (live chop) and the UI write; a version counter tells the UI to refresh.
+- MIDI is applied sample-accurately, so a live-chop cue lands on the exact sample of the key press.
+- Every voice fades in/out (parameter "Declick Fade"), including the last samples of a region.
+- File decoding and peak analysis run on a worker thread; replaced samples stay alive ~6 s before being freed.
+- Bad input: unreadable, empty or oversized (> ~1 GiB) files give a status message and leave the current sample alone.
+- Linear interpolation converts file rate to host rate; real pitch/time-stretch comes in Phase 3.
 
-## Not in Phase 1 (planned)
+## Still to come
 
-2. 4x4 pad grid, per-slice mute/solo/colour, editable note mapping
-3. Pitch (+/-24 st, cents), reverse, start/end, loop, attack/release, time-stretch (library such as Signalsmith Stretch or Rubber Band)
-4. Automatic slicing: transient / beat / bar / equal modes
-5. Keyboard mode (root note + range), key detection, BPM detection and host-tempo sync
-6. Slice export (files, drag-and-drop), presets
+- Per-pad mute/solo/colour, editable MIDI note per pad, per-pad end handle
+- Pitch (+/-24 st, cents), reverse, loop, attack/release, time-stretch (Signalsmith Stretch or Rubber Band)
+- Auto-slicing: transient / beat / bar modes; snap-to-transient for live chop
+- Keyboard mode, key detection, BPM detection and host-tempo sync, slice export, presets
 
 ## Manual test checklist
 
-1. Load a long WAV: waveform appears, whole file fits the view; load a corrupt file and a 0-byte file: message, no crash.
-2. Zoom in/out, pan, click to seek, drag a selection, split by double-click, drag edges, delete, reset.
-3. Play from MIDI keys (C1 upward), hold overlapping notes, retrigger quickly, switch One-Shot/Gate.
-4. Load a new file while notes are playing (no crash, no noise).
-5. Save the Live set, close and reopen: file and slices restored; rename the file and reopen: message, no crash.
-6. Automate Gain in Live; change sample rate (44.1/48/96 kHz) and confirm pitch/speed stay correct.
-7. Resize the window; open several instances.
+1. Load a long WAV: waveform appears; load a corrupt file and an empty file: message, no crash.
+2. Press C1: plays from the start. While playing, press D1, E1 ...: cue flags appear at those moments, audio keeps running.
+3. Press D1 again: jumps to its cue and plays from there. Switch Pad Mode to Slice and compare.
+4. Drag a marker, double-click to place one, right-click a pad to clear it, Chop Equal with 8.
+5. Gate vs One-Shot; hit pads quickly; load a new file while notes play (no crash, no noise).
+6. Save the Live set, close, reopen: file and cues restored; rename the file and reopen: message, no crash.
+7. Automate Gain; change sample rate (44.1/48/96 kHz): pitch/speed must stay correct.

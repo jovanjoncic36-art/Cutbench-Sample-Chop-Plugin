@@ -40,7 +40,8 @@ target_sources(Cutbench PRIVATE
     Source/SampleData.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
-    Source/WaveformView.cpp)
+    Source/WaveformView.cpp
+    Source/PadGrid.cpp)
 
 target_compile_definitions(Cutbench PUBLIC
     JUCE_WEB_BROWSER=0

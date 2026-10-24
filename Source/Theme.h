@@ -16,8 +16,8 @@ namespace Theme
     const juce::Colour accent  { 0xffffa726 };
     const juce::Colour wave    { 0xff79d7c4 };
 
-    // Golden-ratio hue stepping keeps neighbouring slices visually distinct.
-    inline juce::Colour sliceColour (int index)
+    // Golden-ratio hue stepping keeps neighbouring pads visually distinct.
+    inline juce::Colour padColour (int index)
     {
         return juce::Colour::fromHSV (std::fmod ((float) index * 0.61803f, 1.0f), 0.55f, 0.95f, 1.0f);
     }
