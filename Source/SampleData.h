@@ -7,7 +7,7 @@ constexpr int kNumPads = 16;
 
 // One pad = one cue point in the source audio (frames of the source file). Never modifies the audio.
 //   start < 0  -> the pad is empty
-//   end   < 0  -> automatic end (end of file in Cue mode, next cue point in Slice mode)
+//   end   < 0  -> automatic end (the next cue point, or the end of the file for the last cue)
 struct Pad
 {
     juce::int64 start = -1;

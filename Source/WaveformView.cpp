@@ -35,7 +35,6 @@ void WaveformView::refreshPads()
     pads = proc.getPads();
     selectedPad = proc.getSelectedPad();
     seenPadVersion = version;
-    seenSliceMode = proc.isSliceMode();
 }
 
 void WaveformView::modelChanged()
@@ -76,7 +75,7 @@ void WaveformView::timerCallback()
     }
 
     // Pads can also change on the audio thread (live chop), so poll the version.
-    if (proc.getPadVersion() != seenPadVersion || proc.isSliceMode() != seenSliceMode)
+    if (proc.getPadVersion() != seenPadVersion)
     {
         refreshPads();
         needsRepaint = true;
@@ -267,6 +266,20 @@ int WaveformView::flagAt (float x) const
     return best;
 }
 
+bool WaveformView::inHandleZone (float y) const
+{
+    return y > (float) getWaveArea().getBottom() - 26.0f;
+}
+
+bool WaveformView::hitEndHandle (float x) const
+{
+    if (selectedPad < 0 || ! pads[(size_t) selectedPad].isSet())
+        return false;
+
+    const juce::int64 end = proc.getEffectiveEnd (selectedPad);
+    return end >= 0 && std::abs (sampleToX ((double) end) - x) <= kEdgeGrabPixels + 2.0f;
+}
+
 //==============================================================================
 // Painting
 //==============================================================================
@@ -349,6 +362,17 @@ void WaveformView::paint (juce::Graphics& g)
             const float x1 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) end));
             g.setColour (Theme::padColour (selectedPad).withAlpha (0.14f));
             g.fillRect (x0, (float) body.getY(), juce::jmax (0.0f, x1 - x0), (float) body.getHeight());
+
+            // End handle: a line plus a grip at the bottom edge
+            const float ex = sampleToX ((double) end);
+            if (ex >= 0.0f && ex <= w)
+            {
+                const auto colour = Theme::padColour (selectedPad);
+                g.setColour (colour.withAlpha (0.7f));
+                g.drawLine (ex, (float) body.getY(), ex, (float) body.getBottom(), 1.0f);
+                g.setColour (colour);
+                g.fillRect (ex - 5.0f, (float) body.getBottom() - 16.0f, 10.0f, 16.0f);
+            }
         }
     }
 
@@ -405,6 +429,14 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     if (data == nullptr)
         return;
 
+    // 0) The end handle of the selected pad (bottom edge): drag to set where it stops
+    if (inHandleZone (e.position.y) && hitEndHandle (e.position.x))
+    {
+        drag = Drag::endHandle;
+        dragPad = selectedPad;
+        return;
+    }
+
     // 1) A marker line: grab it to move that pad's cue point
     const int marker = hitMarker (e.position.x);
     if (marker >= 0)
@@ -456,6 +488,13 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
         refreshPads();
         repaint();
     }
+    else if (drag == Drag::endHandle)
+    {
+        dragged = true;
+        proc.setPadEnd (dragPad, pos);
+        refreshPads();
+        repaint();
+    }
     else if (drag == Drag::select)
     {
         if (! dragged && std::abs (e.getDistanceFromDragStartX()) < 3)
@@ -481,7 +520,18 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 
 void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    if (data == nullptr || e.position.y < (float) kStripHeight || hitMarker (e.position.x) >= 0)
+    if (data == nullptr || e.position.y < (float) kStripHeight)
+        return;
+
+    if (inHandleZone (e.position.y) && hitEndHandle (e.position.x))   // back to the automatic end
+    {
+        proc.clearPadEnd (selectedPad);
+        refreshPads();
+        repaint();
+        return;
+    }
+
+    if (hitMarker (e.position.x) >= 0)
         return;
 
     proc.setPadStart (proc.getSelectedPad(), clampSample (xToSample (e.position.x)));
@@ -492,7 +542,8 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
-    const bool overMarker = data != nullptr && hitMarker (e.position.x) >= 0;
+    const bool overMarker = data != nullptr && ((inHandleZone (e.position.y) && hitEndHandle (e.position.x))
+                                                || hitMarker (e.position.x) >= 0);
     setMouseCursor (overMarker ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
 }
 

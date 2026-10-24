@@ -10,11 +10,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # JUCE: use a local checkout if given, otherwise fetch a pinned release.
+include(FetchContent)
+
 set(CUTBENCH_JUCE_DIR "" CACHE PATH "Optional path to a local JUCE checkout")
 if(CUTBENCH_JUCE_DIR)
     add_subdirectory(${CUTBENCH_JUCE_DIR} JUCE)
 else()
-    include(FetchContent)
     FetchContent_Declare(JUCE
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
         GIT_TAG        8.0.4
@@ -41,7 +42,8 @@ target_sources(Cutbench PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/WaveformView.cpp
-    Source/PadGrid.cpp)
+    Source/PadGrid.cpp
+    Source/StretchEngine.cpp)
 
 target_compile_definitions(Cutbench PUBLIC
     JUCE_WEB_BROWSER=0
@@ -55,3 +57,17 @@ target_link_libraries(Cutbench
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# Independent pitch / time-stretch engine (header-only, MIT). Switch off with -DCUTBENCH_STRETCH=OFF;
+# the plugin then runs with the "Classic" (linked pitch + speed) engine only.
+option(CUTBENCH_STRETCH "Enable the Signalsmith Stretch engine (Keep Length mode)" ON)
+if(CUTBENCH_STRETCH)
+    FetchContent_Declare(signalsmith_stretch
+        GIT_REPOSITORY https://github.com/Signalsmith-Audio/signalsmith-stretch.git
+        GIT_TAG        main
+        GIT_SHALLOW    TRUE
+        SOURCE_SUBDIR  cutbench-header-only)   # nonexistent subdir: fetch the headers, don't run its CMake
+    FetchContent_MakeAvailable(signalsmith_stretch)
+    target_include_directories(Cutbench PRIVATE ${signalsmith_stretch_SOURCE_DIR})
+    target_compile_definitions(Cutbench PRIVATE CUTBENCH_HAS_STRETCH=1)
+endif()

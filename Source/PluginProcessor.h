@@ -7,19 +7,25 @@
 #include <optional>
 #include <vector>
 #include "SampleData.h"
+#include "StretchEngine.h"
 
 /*
     Model
     -----
-    16 pads = 16 cue points into one loaded sample. Pad n is played by MIDI note (baseNote + n).
+    16 pads = 16 cue points into one loaded sample. Pad n is played by MIDI note (baseNote + n - 1).
     The pad table (start/end per pad) lives in atomics so that BOTH the audio thread (live chop)
     and the message thread (editing) can change it without locks; `padVersion` tells the UI
     when something changed.
 
     Behaviour of a pad key
-      pad has a cue   -> play from the cue (Cue mode: to the end of the file, Slice mode: to the next cue)
+      pad has a cue   -> play from the cue to its end (explicit region end, else the next cue, else end of file)
       pad is empty    -> LIVE CHOP: if something is playing, the cue is set at the current play position
                          and playback simply continues.
+
+    Playback engines (per voice)
+      Classic     : resampling with cubic interpolation. Pitch and speed are linked (tape / turntable style).
+      Keep Length : Signalsmith Stretch. Pitch and speed are independent. Costs CPU and adds some latency,
+                    so the number of such voices is limited (kStretchSlots); extra voices fall back to Classic.
 
     Threading
       Audio thread : never locks or allocates. Reads `audioSample`, the pad atomics, the UI command FIFO
@@ -31,7 +37,10 @@ class CutbenchProcessor : public juce::AudioProcessor,
 {
 public:
     static constexpr int kMaxVoices = 32;
-    static constexpr juce::int64 kMinRegionLength = 64;   // frames
+    static constexpr int kStretchSlots = 8;
+    static constexpr int kStretchChunk = 512;                    // output frames per stretch call
+    static constexpr int kStretchMaxInput = kStretchChunk * 32;  // input frames per stretch call
+    static constexpr juce::int64 kMinRegionLength = 64;          // frames
     using PadArray = std::array<Pad, kNumPads>;
 
     CutbenchProcessor();
@@ -73,11 +82,12 @@ public:
     juce::uint32 getActivePadMask() const noexcept { return activePadMask.load (std::memory_order_relaxed); }
     int  getSelectedPad() const noexcept { return selectedPad.load (std::memory_order_relaxed); }
     void setSelectedPad (int pad);
-    bool isSliceMode() const noexcept { return padModeParam->load() > 0.5f; }
     int  getBaseNote() const noexcept { return juce::roundToInt (baseNoteParam->load()); }
 
     void setPadStart (int pad, juce::int64 position);            // cue point, automatic end
     void setPadRegion (int pad, juce::int64 start, juce::int64 end);
+    void setPadEnd (int pad, juce::int64 end);                   // explicit end for a pad that has a cue
+    void clearPadEnd (int pad);                                  // back to the automatic end
     void clearPad (int pad);
     void clearAllPads();
     void chopEqual (int numPads);                                // pads 1..N = N equal regions
@@ -98,10 +108,15 @@ private:
     struct Voice
     {
         bool active = false, releasing = false, preview = false;
+        bool reverse = false, loop = false, flushing = false;
         int pad = -1;
-        double pos = 0.0;
-        juce::int64 end = 0;
-        float env = 0.0f, gain = 1.0f;
+        int stretchSlot = -1;          // index into stretchPool, or -1 for the Classic engine
+        int flushLeft = 0;             // stretch engine: output frames left after the region ended
+        double pos = 0.0;              // source frame position (fractional; integer-valued for stretch voices)
+        double curRate = 1.0;          // smoothed source frames per output frame (Classic engine)
+        double inFrac = 0.0;           // stretch engine: fractional input frames carried between calls
+        juce::int64 start = 0, end = 0;
+        float env = 0.0f, gain = 1.0f, relInc = 0.0f, wrapRamp = 1.0f;
         juce::uint64 age = 0;
     };
 
@@ -131,7 +146,7 @@ private:
 
     // shared (either thread)
     void bumpPadVersion() noexcept { padVersion.fetch_add (1, std::memory_order_release); }
-    juce::int64 resolveEnd (int pad, bool sliceMode, juce::int64 length) const;
+    juce::int64 resolveEnd (int pad, juce::int64 length) const;
 
     // audio thread
     void pushCommand (const Command&);
@@ -139,8 +154,14 @@ private:
     void handleMidi (const juce::MidiMessage&);
     void padOn (int pad, float velocity);
     void padOff (int pad);
+    void releaseVoice (Voice&, bool soft);
     void startVoice (int pad, juce::int64 start, juce::int64 end, float velocity, bool preview);
+    int  acquireStretchSlot() const;
+    double audiblePosition (const Voice&) const;
+    bool advanceEnvelope (Voice&) const;
     void renderVoices (juce::AudioBuffer<float>&, int startSample, int numSamples);
+    void renderClassicVoice (Voice&, juce::AudioBuffer<float>&, int startSample, int numSamples);
+    void renderStretchVoice (Voice&, juce::AudioBuffer<float>&, int startSample, int numSamples);
 
     // ---- message-thread state ----
     mutable juce::CriticalSection modelLock;
@@ -166,15 +187,26 @@ private:
     std::atomic<float>* playModeParam = nullptr;
     std::atomic<float>* padModeParam = nullptr;
     std::atomic<float>* fadeParam = nullptr;
+    std::atomic<float>* pitchParam = nullptr;
+    std::atomic<float>* fineParam = nullptr;
+    std::atomic<float>* speedParam = nullptr;
+    std::atomic<float>* engineParam = nullptr;
+    std::atomic<float>* reverseParam = nullptr;
+    std::atomic<float>* loopParam = nullptr;
+    std::atomic<float>* attackParam = nullptr;
+    std::atomic<float>* releaseParam = nullptr;
 
     // ---- audio-thread-only state ----
     const SampleData* activeSample = nullptr;
     std::array<Voice, kMaxVoices> voices;
+    std::array<StretchEngine, kStretchSlots> stretchPool;
+    std::array<std::vector<float>, 2> stretchIn, stretchOut;
     juce::uint64 voiceCounter = 0;
+
     double currentSampleRate = 44100.0;
-    float fadeSamples = 64.0f;
-    bool gateMode = false;
-    bool sliceMode = false;
+    double pitchRatio = 1.0, speedValue = 1.0, fileToHost = 1.0, rateSmooth = 0.001;
+    float fadeSamples = 64.0f, attackSamples = 64.0f, releaseSamples = 64.0f, attackInc = 0.01f;
+    bool gateMode = false, polyMode = false, keepLength = false, reverseOn = false, loopOn = false;
     int baseNote = 36;
     juce::SmoothedValue<float> gainSmoothed;
 

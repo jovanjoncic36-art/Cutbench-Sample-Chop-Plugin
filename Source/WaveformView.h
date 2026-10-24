@@ -15,6 +15,7 @@
       drag             select a region
       double-click     set the SELECTED pad's cue at that position (then the next empty pad is selected)
       drag a marker    move that pad's cue point
+      drag the handle  at the bottom edge of the waveform: set where the selected pad stops (double-click: automatic)
       click a flag     select that pad and play it (hold = gate)
       Cmd/Ctrl+scroll  zoom around the pointer     scroll / two-finger swipe: pan
       pinch            zoom                        Space: play / stop    Delete: clear the selected pad
@@ -56,7 +57,7 @@ private:
     static constexpr float kEdgeGrabPixels = 5.0f;
     static constexpr float kFlagWidth = 46.0f;
 
-    enum class Drag { none, select, marker, flag };
+    enum class Drag { none, select, marker, flag, endHandle };
 
     juce::Rectangle<int> getWaveArea() const;
     double xToSample (float x) const noexcept { return viewStart + (double) x * samplesPerPixel; }
@@ -64,6 +65,8 @@ private:
     juce::int64 clampSample (double s) const;
     int hitMarker (float x) const;     // marker line under x (-1 = none)
     int flagAt (float x) const;        // flag body under x (-1 = none)
+    bool inHandleZone (float y) const; // bottom strip of the waveform where the end handle lives
+    bool hitEndHandle (float x) const; // end handle of the selected pad under x
 
     void refreshPads();
     void advanceSelection();
@@ -84,7 +87,6 @@ private:
     CutbenchProcessor::PadArray pads;
     int selectedPad = 0;
     juce::uint32 seenPadVersion = ~(juce::uint32) 0;
-    bool seenSliceMode = false;
 
     double viewStart = 0.0;
     double samplesPerPixel = 1.0;

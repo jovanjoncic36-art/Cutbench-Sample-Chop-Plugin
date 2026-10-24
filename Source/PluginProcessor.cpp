@@ -21,13 +21,42 @@ juce::AudioProcessorValueTreeState::ParameterLayout CutbenchProcessor::createLay
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "playMode", 1 }, "Play Mode",
                                                         StringArray { "One-Shot", "Gate" }, 0));
 
-    // Cue   : a pad plays from its cue to the end of the file; pressing any pad cuts the others (DJ-style cues)
-    // Slice : a pad plays from its cue to the next cue; different pads can overlap (drum-style slices)
-    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "padMode", 1 }, "Pad Mode",
-                                                        StringArray { "Cue", "Slice" }, 0));
+    // Mono : pressing a pad cuts every other sounding pad (one chop at a time)
+    // Poly : different pads can sound at the same time; only an earlier hit of the same pad is cut
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "padMode", 1 }, "Voices",
+                                                        StringArray { "Mono", "Poly" }, 0));
 
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "fadeMs", 1 }, "Fade",
                                                        NormalisableRange<float> (0.5f, 20.0f, 0.1f), 2.0f,
+                                                       AudioParameterFloatAttributes().withLabel ("ms")));
+
+    // --- Phase 3: pitch, speed, direction, loop, envelope ---
+    layout.add (std::make_unique<AudioParameterInt> (ParameterID { "pitch", 1 }, "Pitch", -24, 24, 0));
+
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "fine", 1 }, "Fine Tune",
+                                                       NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f,
+                                                       AudioParameterFloatAttributes().withLabel ("cent")));
+
+    NormalisableRange<float> speedRange (0.25f, 4.0f, 0.001f);
+    speedRange.setSkewForCentre (1.0f);
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "speed", 1 }, "Speed", speedRange, 1.0f));
+
+    // Classic     : pitch and speed are linked (tape style), cheap
+    // Keep Length : pitch and speed are independent (time-stretch engine), needs more CPU
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "engine", 1 }, "Engine",
+                                                        StringArray { "Classic", "Keep Length" }, 0));
+
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "reverse", 1 }, "Reverse", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "loop", 1 }, "Loop", false));
+
+    NormalisableRange<float> attackRange (0.0f, 1000.0f, 0.1f);
+    attackRange.setSkewForCentre (60.0f);
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "attackMs", 1 }, "Attack", attackRange, 0.0f,
+                                                       AudioParameterFloatAttributes().withLabel ("ms")));
+
+    NormalisableRange<float> releaseRange (0.0f, 2000.0f, 0.1f);
+    releaseRange.setSkewForCentre (150.0f);
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "releaseMs", 1 }, "Release", releaseRange, 0.0f,
                                                        AudioParameterFloatAttributes().withLabel ("ms")));
     return layout;
 }
@@ -48,6 +77,17 @@ CutbenchProcessor::CutbenchProcessor()
     playModeParam = apvts.getRawParameterValue ("playMode");
     padModeParam  = apvts.getRawParameterValue ("padMode");
     fadeParam     = apvts.getRawParameterValue ("fadeMs");
+    pitchParam    = apvts.getRawParameterValue ("pitch");
+    fineParam     = apvts.getRawParameterValue ("fine");
+    speedParam    = apvts.getRawParameterValue ("speed");
+    engineParam   = apvts.getRawParameterValue ("engine");
+    reverseParam  = apvts.getRawParameterValue ("reverse");
+    loopParam     = apvts.getRawParameterValue ("loop");
+    attackParam   = apvts.getRawParameterValue ("attackMs");
+    releaseParam  = apvts.getRawParameterValue ("releaseMs");
+
+    for (auto& buffer : stretchIn)  buffer.assign ((size_t) kStretchMaxInput, 0.0f);
+    for (auto& buffer : stretchOut) buffer.assign ((size_t) kStretchChunk, 0.0f);
 }
 
 CutbenchProcessor::~CutbenchProcessor()
@@ -70,14 +110,36 @@ juce::AudioProcessorEditor* CutbenchProcessor::createEditor()
 //==============================================================================
 // Audio thread
 //==============================================================================
+namespace
+{
+    // Catmull-Rom spline through y1..y2, t in [0,1)
+    inline float cubic (float y0, float y1, float y2, float y3, float t) noexcept
+    {
+        const float c1 = 0.5f * (y2 - y0);
+        const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+        const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+        return ((c3 * t + c2) * t + c1) * t + y1;
+    }
+
+    inline float readCubic (const float* d, juce::int64 last, juce::int64 i1, float t) noexcept
+    {
+        auto at = [d, last] (juce::int64 i) { return d[juce::jlimit<juce::int64> (0, last, i)]; };
+        return cubic (at (i1 - 1), at (i1), at (i1 + 1), at (i1 + 2), t);
+    }
+}
+
 void CutbenchProcessor::prepareToPlay (double sampleRate, int)
 {
     currentSampleRate = sampleRate;
     gainSmoothed.reset (sampleRate, 0.02);
     gainSmoothed.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (gainParam->load(), -60.0f));
+    rateSmooth = 1.0 - std::exp (-1.0 / (0.010 * sampleRate));   // ~10 ms glide for pitch / speed changes
 
     for (auto& v : voices)
         v = Voice {};
+
+    for (auto& engine : stretchPool)   // allocates, which is fine here and forbidden in processBlock
+        engine.prepare (sampleRate);
 }
 
 void CutbenchProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -98,10 +160,25 @@ void CutbenchProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         activeSample = sample;
     }
 
-    fadeSamples = juce::jmax (1.0f, fadeParam->load() * 0.001f * (float) currentSampleRate);
-    gateMode    = playModeParam->load() > 0.5f;
-    sliceMode   = padModeParam->load() > 0.5f;
-    baseNote    = juce::roundToInt (baseNoteParam->load());
+    // Parameters for this block
+    const float sr = (float) currentSampleRate;
+    fadeSamples    = juce::jmax (1.0f, fadeParam->load() * 0.001f * sr);
+    attackSamples  = juce::jmax (fadeSamples, attackParam->load() * 0.001f * sr);
+    releaseSamples = juce::jmax (fadeSamples, releaseParam->load() * 0.001f * sr);
+    attackInc      = 1.0f / attackSamples;
+
+    gateMode   = playModeParam->load() > 0.5f;
+    polyMode   = padModeParam->load() > 0.5f;
+    baseNote   = juce::roundToInt (baseNoteParam->load());
+    reverseOn  = reverseParam->load() > 0.5f;
+    loopOn     = loopParam->load() > 0.5f;
+    keepLength = engineParam->load() > 0.5f && StretchEngine::isAvailable();
+
+    const double semitones = (double) pitchParam->load() + (double) fineParam->load() / 100.0;
+    pitchRatio = std::pow (2.0, semitones / 12.0);
+    speedValue = (double) speedParam->load();
+    fileToHost = activeSample != nullptr ? activeSample->sampleRate / currentSampleRate : 1.0;
+
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainParam->load(), -60.0f));
 
     drainCommands();
@@ -148,7 +225,7 @@ void CutbenchProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (v.age >= newest)
         {
             newest = v.age;
-            ph = (juce::int64) v.pos;
+            ph = (juce::int64) juce::jmax (0.0, audiblePosition (v));
         }
         if (! v.preview && ! v.releasing && v.pad >= 0)
             mask |= (juce::uint32) 1 << v.pad;
@@ -170,34 +247,39 @@ void CutbenchProcessor::handleMidi (const juce::MidiMessage& m)
     else if (m.isAllNotesOff() || m.isAllSoundOff())
     {
         for (auto& v : voices)
-            if (v.active)
-                v.releasing = true;
+            releaseVoice (v, false);
     }
 }
 
-juce::int64 CutbenchProcessor::resolveEnd (int pad, bool slice, juce::int64 length) const
+juce::int64 CutbenchProcessor::resolveEnd (int pad, juce::int64 length) const
 {
     const juce::int64 start = padStart[(size_t) pad].load (std::memory_order_relaxed);
     const juce::int64 explicitEnd = padEnd[(size_t) pad].load (std::memory_order_relaxed);
 
-    if (explicitEnd > start)
+    if (explicitEnd > start)   // region set via "Set Pad" / "Chop Equal" / the end handle
         return juce::jmin (explicitEnd, length);
 
-    if (slice)   // up to the next cue point
+    // Otherwise the chop ends where the next cue point begins (the last cue runs to the end of the file)
+    juce::int64 next = length;
+    for (size_t i = 0; i < (size_t) kNumPads; ++i)
     {
-        juce::int64 next = length;
-        for (size_t i = 0; i < (size_t) kNumPads; ++i)
-        {
-            if ((int) i == pad)
-                continue;
-            const juce::int64 s = padStart[i].load (std::memory_order_relaxed);
-            if (s > start && s < next)
-                next = s;
-        }
-        return next;
+        if ((int) i == pad)
+            continue;
+        const juce::int64 s = padStart[i].load (std::memory_order_relaxed);
+        if (s > start && s < next)
+            next = s;
     }
+    return next;
+}
 
-    return length;
+double CutbenchProcessor::audiblePosition (const Voice& v) const
+{
+    if (v.stretchSlot < 0)
+        return v.pos;
+
+    // A stretch voice reads its input ahead of what is audible by the engine latency.
+    const double latency = (double) stretchPool[(size_t) v.stretchSlot].latencySamples();
+    return v.reverse ? v.pos + latency : v.pos - latency;
 }
 
 void CutbenchProcessor::padOn (int pad, float velocity)
@@ -219,23 +301,23 @@ void CutbenchProcessor::padOn (int pad, float velocity)
 
         if (reference != nullptr)
         {
-            padStart[(size_t) pad].store (juce::jlimit<juce::int64> (0, length - 1, (juce::int64) reference->pos),
-                                          std::memory_order_relaxed);
+            const auto position = (juce::int64) audiblePosition (*reference);
+            padStart[(size_t) pad].store (juce::jlimit<juce::int64> (0, length - 1, position), std::memory_order_relaxed);
             padEnd[(size_t) pad].store (-1, std::memory_order_relaxed);
             bumpPadVersion();
         }
         return;
     }
 
-    // Pad with a cue: jump there. The source playback is always replaced; in Cue mode every other voice is
-    // cut as well, in Slice mode only an earlier hit of the same pad.
-    const juce::int64 end = resolveEnd (pad, sliceMode, length);
+    // Pad with a cue: jump there. The source playback is always replaced; in Mono mode every other voice is
+    // cut as well, in Poly mode only an earlier hit of the same pad.
+    const juce::int64 end = resolveEnd (pad, length);
     if (end - start < 2)
         return;
 
     for (auto& v : voices)
-        if (v.active && (v.preview || ! sliceMode || v.pad == pad))
-            v.releasing = true;
+        if (v.active && (v.preview || ! polyMode || v.pad == pad))
+            releaseVoice (v, false);
 
     startVoice (pad, start, end, velocity, false);
 }
@@ -247,7 +329,40 @@ void CutbenchProcessor::padOff (int pad)
 
     for (auto& v : voices)
         if (v.active && ! v.preview && v.pad == pad)
-            v.releasing = true;
+            releaseVoice (v, true);
+}
+
+// soft = use the Release time (key released); otherwise a quick declick fade (voice is being cut)
+void CutbenchProcessor::releaseVoice (Voice& v, bool soft)
+{
+    if (! v.active)
+        return;
+
+    const float inc = 1.0f / (soft ? releaseSamples : fadeSamples);
+    if (v.releasing)
+        v.relInc = juce::jmax (v.relInc, soft ? 0.0f : inc);   // a cut may speed up a slower release
+    else
+    {
+        v.releasing = true;
+        v.relInc = inc;
+    }
+}
+
+int CutbenchProcessor::acquireStretchSlot() const
+{
+    for (int s = 0; s < kStretchSlots; ++s)
+    {
+        bool used = false;
+        for (const auto& v : voices)
+            if (v.active && v.stretchSlot == s)
+            {
+                used = true;
+                break;
+            }
+        if (! used)
+            return s;
+    }
+    return -1;   // pool exhausted: the voice falls back to the Classic engine
 }
 
 void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end, float velocity, bool preview)
@@ -264,7 +379,7 @@ void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end,
     if (preview)   // a new preview replaces the previous one
         for (auto& v : voices)
             if (v.active && v.preview)
-                v.releasing = true;
+                releaseVoice (v, false);
 
     Voice* slot = nullptr;
     for (auto& v : voices)
@@ -279,13 +394,42 @@ void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end,
     }
 
     *slot = Voice {};
-    slot->active  = true;
-    slot->preview = preview;
-    slot->pad     = pad;
-    slot->pos     = (double) start;
-    slot->end     = end;
-    slot->gain    = juce::jlimit (0.0f, 1.0f, velocity);
-    slot->age     = ++voiceCounter;
+    slot->active   = true;
+    slot->preview  = preview;
+    slot->reverse  = reverseOn;
+    slot->loop     = loopOn;
+    slot->pad      = pad;
+    slot->start    = start;
+    slot->end      = end;
+    slot->pos      = reverseOn ? (double) (end - 1) : (double) start;
+    slot->curRate  = speedValue * pitchRatio * fileToHost;
+    slot->gain     = juce::jlimit (0.0f, 1.0f, velocity);
+    slot->age      = ++voiceCounter;
+
+    if (keepLength)
+    {
+        slot->stretchSlot = acquireStretchSlot();
+        if (slot->stretchSlot >= 0)
+            stretchPool[(size_t) slot->stretchSlot].reset();
+    }
+}
+
+bool CutbenchProcessor::advanceEnvelope (Voice& v) const
+{
+    if (v.releasing)
+    {
+        v.env -= v.relInc;
+        if (v.env <= 0.0f)
+        {
+            v.active = false;
+            return false;
+        }
+    }
+    else if (v.env < 1.0f)
+    {
+        v.env = juce::jmin (1.0f, v.env + attackInc);
+    }
+    return true;
 }
 
 void CutbenchProcessor::renderVoices (juce::AudioBuffer<float>& out, int startSample, int numSamples)
@@ -293,51 +437,178 @@ void CutbenchProcessor::renderVoices (juce::AudioBuffer<float>& out, int startSa
     if (numSamples <= 0 || activeSample == nullptr)
         return;
 
-    const auto& audio = activeSample->audio;
-    const float* srcL = audio.getReadPointer (0);
-    const float* srcR = audio.getNumChannels() > 1 ? audio.getReadPointer (1) : srcL;
-    const juce::int64 lastFrame = audio.getNumSamples() - 1;
-
-    float* outL = out.getWritePointer (0, startSample);
-    float* outR = out.getNumChannels() > 1 ? out.getWritePointer (1, startSample) : nullptr;
-
-    // Source-rate -> host-rate conversion (linear interpolation; no pitch control yet)
-    const double step = activeSample->sampleRate / currentSampleRate;
-    const float envInc = 1.0f / fadeSamples;
-
     for (auto& v : voices)
     {
         if (! v.active)
             continue;
 
-        for (int i = 0; i < numSamples; ++i)
+        if (v.stretchSlot >= 0)
+            renderStretchVoice (v, out, startSample, numSamples);
+        else
+            renderClassicVoice (v, out, startSample, numSamples);
+    }
+}
+
+// Classic engine: cubic-interpolated resampling. Pitch and speed together set one playback rate.
+void CutbenchProcessor::renderClassicVoice (Voice& v, juce::AudioBuffer<float>& out, int startSample, int numSamples)
+{
+    const auto& audio = activeSample->audio;
+    const float* srcL = audio.getReadPointer (0);
+    const float* srcR = audio.getNumChannels() > 1 ? audio.getReadPointer (1) : srcL;
+    const juce::int64 last = audio.getNumSamples() - 1;
+
+    float* outL = out.getWritePointer (0, startSample);
+    float* outR = out.getNumChannels() > 1 ? out.getWritePointer (1, startSample) : nullptr;
+
+    const double targetRate = speedValue * pitchRatio * fileToHost;
+    const double regionLen = (double) (v.end - v.start);
+    const double startPos = (double) v.start;
+    const double endPos = (double) v.end;
+    const float wrapInc = 1.0f / fadeSamples;
+
+    // Length of the fade at the end of the region: the Release time, but never more than half the region
+    const double rate0 = juce::jmax (v.curRate, 1.0e-6);
+    const float tailLen = v.loop ? fadeSamples
+                                 : juce::jmax (1.0f, (float) juce::jmin ((double) juce::jmax (fadeSamples, releaseSamples),
+                                                                         0.5 * regionLen / rate0));
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        if (! advanceEnvelope (v))
+            break;
+
+        v.curRate += (targetRate - v.curRate) * rateSmooth;
+
+        const juce::int64 idx = (juce::int64) std::floor (v.pos);
+        const float frac = (float) (v.pos - (double) idx);
+        const float l = readCubic (srcL, last, idx, frac);
+        const float r = outR != nullptr ? readCubic (srcR, last, idx, frac) : 0.0f;
+
+        const double remainingSrc = v.reverse ? (v.pos - startPos) : (endPos - v.pos);
+        const double remainingOut = remainingSrc / juce::jmax (v.curRate, 1.0e-6);
+        const float tail = remainingOut >= (double) tailLen ? 1.0f : (float) juce::jmax (0.0, remainingOut / (double) tailLen);
+
+        v.wrapRamp = juce::jmin (1.0f, v.wrapRamp + wrapInc);
+        const float g = v.gain * v.env * tail * v.wrapRamp;
+
+        outL[i] += l * g;
+        if (outR != nullptr)
+            outR[i] += r * g;
+
+        v.pos += v.reverse ? -v.curRate : v.curRate;
+
+        const bool past = v.reverse ? (v.pos < startPos) : (v.pos >= endPos);
+        if (past)
         {
-            if (v.releasing)
+            if (v.loop && ! v.releasing)
             {
-                v.env -= envInc;
-                if (v.env <= 0.0f) { v.active = false; break; }
+                v.pos += v.reverse ? regionLen : -regionLen;
+                v.pos = juce::jlimit (startPos, endPos - 0.001, v.pos);
+                v.wrapRamp = 0.0f;   // short fade-in after the jump hides the loop seam
             }
-            else if (v.env < 1.0f)
+            else
             {
-                v.env = juce::jmin (1.0f, v.env + envInc);
+                v.active = false;
+                break;
             }
+        }
+    }
+}
 
-            const juce::int64 idx  = (juce::int64) v.pos;
-            const juce::int64 idx2 = juce::jmin (idx + 1, lastFrame);
-            const float frac = (float) (v.pos - (double) idx);
+// Keep Length engine: the stretcher gets source frames at (speed x rate) per output frame and shifts pitch
+// independently of that. It adds latency, so the end of the region is followed by a short flush.
+void CutbenchProcessor::renderStretchVoice (Voice& v, juce::AudioBuffer<float>& out, int startSample, int numSamples)
+{
+    const auto& audio = activeSample->audio;
+    const float* srcL = audio.getReadPointer (0);
+    const float* srcR = audio.getNumChannels() > 1 ? audio.getReadPointer (1) : srcL;
 
-            // Fade out the tail so the end of a region never clicks
-            const float remaining = (float) ((double) v.end - v.pos);
-            const float tail = remaining >= fadeSamples ? 1.0f : juce::jmax (0.0f, remaining / fadeSamples);
-            const float g = v.gain * v.env * tail;
+    float* outL = out.getWritePointer (0, startSample);
+    float* outR = out.getNumChannels() > 1 ? out.getWritePointer (1, startSample) : nullptr;
 
-            outL[i] += (srcL[idx] + frac * (srcL[idx2] - srcL[idx])) * g;
-            if (outR != nullptr)
-                outR[i] += (srcR[idx] + frac * (srcR[idx2] - srcR[idx])) * g;
+    auto& engine = stretchPool[(size_t) v.stretchSlot];
+    engine.setTransposeFactor ((float) (pitchRatio * fileToHost));   // fileToHost compensates a file/host rate mismatch
+
+    const double ratio = speedValue * fileToHost;   // source frames consumed per output frame
+    const double step = v.reverse ? -1.0 : 1.0;
+    const int latency = engine.latencySamples();
+    const double startPos = (double) v.start;
+    const double endPos = (double) v.end;
+
+    float* inL = stretchIn[0].data();
+    float* inR = stretchIn[1].data();
+    float* tmpL = stretchOut[0].data();
+    float* tmpR = stretchOut[1].data();
+
+    int done = 0;
+    while (done < numSamples && v.active)
+    {
+        const int n = juce::jmin (kStretchChunk, numSamples - done);
+
+        const double wanted = (double) n * ratio + v.inFrac;
+        const int inFrames = juce::jlimit (1, kStretchMaxInput, (int) wanted);
+        v.inFrac = wanted - (double) inFrames;
+        if (inFrames == kStretchMaxInput)
+            v.inFrac = 0.0;
+
+        // Read the next source frames (silence outside the region, so the tail can be flushed out)
+        for (int k = 0; k < inFrames; ++k)
+        {
+            const juce::int64 idx = (juce::int64) v.pos;
+            if ((double) idx >= startPos && (double) idx < endPos)
+            {
+                inL[k] = srcL[idx];
+                inR[k] = srcR[idx];
+            }
+            else
+            {
+                inL[k] = 0.0f;
+                inR[k] = 0.0f;
+            }
 
             v.pos += step;
-            if (v.pos >= (double) v.end) { v.active = false; break; }
+
+            if (! v.flushing)
+            {
+                const bool past = v.reverse ? (v.pos < startPos) : (v.pos >= endPos);
+                if (past)
+                {
+                    if (v.loop && ! v.releasing)
+                        v.pos = v.reverse ? (double) (v.end - 1) : startPos;
+                    else
+                    {
+                        v.flushing = true;
+                        v.flushLeft = latency;
+                    }
+                }
+            }
         }
+
+        engine.process (inL, inR, inFrames, tmpL, tmpR, n);
+
+        for (int i = 0; i < n; ++i)
+        {
+            if (! advanceEnvelope (v))
+                break;
+
+            float tail = 1.0f;
+            if (v.flushing)
+            {
+                tail = juce::jmin (1.0f, (float) v.flushLeft / fadeSamples);
+                if (--v.flushLeft <= 0)
+                {
+                    v.active = false;
+                    break;
+                }
+            }
+
+            const float g = v.gain * v.env * tail;
+            outL[done + i] += tmpL[i] * g;
+            if (outR != nullptr)
+                outR[done + i] += tmpR[i] * g;
+        }
+
+        done += n;
     }
 }
 
@@ -369,8 +640,7 @@ void CutbenchProcessor::drainCommands()
             case Command::Type::playRegion: startVoice (-1, c.start, c.end, 1.0f, true); break;
             case Command::Type::stopAll:
                 for (auto& v : voices)
-                    if (v.active)
-                        v.releasing = true;
+                    releaseVoice (v, false);
                 break;
         }
     };
@@ -635,6 +905,29 @@ void CutbenchProcessor::setPadRegion (int pad, juce::int64 start, juce::int64 en
     bumpPadVersion();
 }
 
+void CutbenchProcessor::setPadEnd (int pad, juce::int64 end)
+{
+    const juce::int64 len = currentLength();
+    if (len <= kMinRegionLength || pad < 0 || pad >= kNumPads)
+        return;
+
+    const juce::int64 start = padStart[(size_t) pad].load();
+    if (start < 0)
+        return;
+
+    padEnd[(size_t) pad].store (juce::jlimit<juce::int64> (start + kMinRegionLength, len, end));
+    bumpPadVersion();
+}
+
+void CutbenchProcessor::clearPadEnd (int pad)
+{
+    if (pad < 0 || pad >= kNumPads)
+        return;
+
+    padEnd[(size_t) pad].store (-1);
+    bumpPadVersion();
+}
+
 void CutbenchProcessor::clearPad (int pad)
 {
     if (pad < 0 || pad >= kNumPads)
@@ -720,7 +1013,7 @@ juce::int64 CutbenchProcessor::getEffectiveEnd (int pad) const
     const juce::int64 len = currentLength();
     if (pad < 0 || pad >= kNumPads || len <= 0 || padStart[(size_t) pad].load() < 0)
         return -1;
-    return resolveEnd (pad, isSliceMode(), len);
+    return resolveEnd (pad, len);
 }
 
 int CutbenchProcessor::nextEmptyPad (int after) const

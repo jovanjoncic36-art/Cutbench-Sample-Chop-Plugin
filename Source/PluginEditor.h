@@ -24,9 +24,11 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void chooseFile();
     void refreshStatus();
+    void resetPitch();
 
     using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using ButtonAttachment   = juce::AudioProcessorValueTreeState::ButtonAttachment;
 
     CutbenchProcessor& proc;
     CutbenchLookAndFeel lnf;   // declared first so it outlives every component using it
@@ -37,15 +39,21 @@ private:
     juce::TextButton loadButton { "Load..." }, playButton { "Play" }, stopButton { "Stop" },
                      setPadButton { "Set Pad" }, clearPadButton { "Clear Pad" }, clearAllButton { "Clear All" },
                      chopButton { "Chop Equal" },
-                     zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" };
+                     zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" },
+                     reverseButton { "Reverse" }, loopButton { "Loop" }, resetPitchButton { "Reset Pitch" };
 
     juce::Label fileLabel, infoLabel, statusLabel, hintLabel;
-    juce::Label gainLabel, noteLabel, modeLabel, padModeLabel, fadeLabel;
-    juce::Slider gainSlider, noteSlider, fadeSlider, chopCountSlider;
-    juce::ComboBox modeBox, padModeBox;
+    juce::Label pitchLabel, fineLabel, speedLabel, engineLabel, directionLabel, repeatLabel, resetLabel;
+    juce::Label attackLabel, releaseLabel, fadeLabel, gainLabel, noteLabel, modeLabel, padModeLabel;
 
-    std::unique_ptr<SliderAttachment> gainAttachment, noteAttachment, fadeAttachment;
-    std::unique_ptr<ComboBoxAttachment> modeAttachment, padModeAttachment;
+    juce::Slider pitchSlider, fineSlider, speedSlider, attackSlider, releaseSlider,
+                 fadeSlider, gainSlider, noteSlider, chopCountSlider;
+    juce::ComboBox engineBox, modeBox, padModeBox;
+
+    std::unique_ptr<SliderAttachment> pitchAttachment, fineAttachment, speedAttachment, attackAttachment,
+                                      releaseAttachment, fadeAttachment, gainAttachment, noteAttachment;
+    std::unique_ptr<ComboBoxAttachment> engineAttachment, modeAttachment, padModeAttachment;
+    std::unique_ptr<ButtonAttachment> reverseAttachment, loopAttachment;
 
     juce::Rectangle<int> controlsArea;
     std::unique_ptr<juce::FileChooser> chooser;
