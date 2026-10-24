@@ -11,11 +11,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure
-        run: cmake -B build -G Xcode
+      - name: Build (with time-stretch engine)
+        id: full
+        continue-on-error: true
+        run: |
+          cmake -B build -G Xcode -DCUTBENCH_STRETCH=ON
+          cmake --build build --config Release
 
-      - name: Build
-        run: cmake --build build --config Release
+      - name: Fallback build (without time-stretch engine)
+        if: steps.full.outcome == 'failure'
+        run: |
+          echo "::warning::The time-stretch library failed to build. Building without it (Classic engine only)."
+          rm -rf build
+          cmake -B build -G Xcode -DCUTBENCH_STRETCH=OFF
+          cmake --build build --config Release
 
       - name: Package
         run: |
