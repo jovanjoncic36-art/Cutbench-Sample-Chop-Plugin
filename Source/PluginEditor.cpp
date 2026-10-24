@@ -20,7 +20,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
                      &chopButton, &zoomInButton, &zoomOutButton, &fitButton,
                      &reverseButton, &loopButton, &resetPitchButton })
         addAndMakeVisible (*b);
-    for (auto* l : { &fileLabel, &infoLabel, &statusLabel, &hintLabel,
+    for (auto* l : { &fileLabel, &infoLabel, &versionLabel, &statusLabel, &hintLabel,
                      &pitchLabel, &fineLabel, &speedLabel, &engineLabel, &directionLabel, &repeatLabel, &resetLabel,
                      &attackLabel, &releaseLabel, &fadeLabel, &gainLabel, &noteLabel, &modeLabel, &padModeLabel })
         addAndMakeVisible (*l);
@@ -59,6 +59,9 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     small (hintLabel, "play, then hit EMPTY pads to set cues | pad with cue: jump + play | dbl-click: set cue | right-click pad: clear",
            juce::Justification::centredRight);
     small (infoLabel, "BPM --    KEY --", juce::Justification::centredRight);   // detection arrives in a later phase
+    small (versionLabel, juce::String ("Cutbench v") + JucePlugin_VersionString
+                         + (StretchEngine::isAvailable() ? "  |  Keep Length: on" : "  |  Keep Length: off"),
+           juce::Justification::centredRight);
 
     fileLabel.setFont (fileLabel.getFont().withHeight (16.0f));
     fileLabel.setJustificationType (juce::Justification::centredLeft);
@@ -225,7 +228,8 @@ void CutbenchEditor::resized()
     auto top = r.removeFromTop (30);
     loadButton.setBounds (top.removeFromLeft (96));
     top.removeFromLeft (12);
-    infoLabel.setBounds (top.removeFromRight (190));
+    infoLabel.setBounds (top.removeFromRight (150));
+    versionLabel.setBounds (top.removeFromRight (230));
     fileLabel.setBounds (top);
     r.removeFromTop (10);
 

@@ -42,7 +42,7 @@ private:
                      zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" },
                      reverseButton { "Reverse" }, loopButton { "Loop" }, resetPitchButton { "Reset Pitch" };
 
-    juce::Label fileLabel, infoLabel, statusLabel, hintLabel;
+    juce::Label fileLabel, infoLabel, versionLabel, statusLabel, hintLabel;
     juce::Label pitchLabel, fineLabel, speedLabel, engineLabel, directionLabel, repeatLabel, resetLabel;
     juce::Label attackLabel, releaseLabel, fadeLabel, gainLabel, noteLabel, modeLabel, padModeLabel;
 

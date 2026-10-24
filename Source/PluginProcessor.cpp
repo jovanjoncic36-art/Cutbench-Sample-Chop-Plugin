@@ -277,9 +277,9 @@ double CutbenchProcessor::audiblePosition (const Voice& v) const
     if (v.stretchSlot < 0)
         return v.pos;
 
-    // A stretch voice reads its input ahead of what is audible by the engine latency.
-    const double latency = (double) stretchPool[(size_t) v.stretchSlot].latencySamples();
-    return v.reverse ? v.pos + latency : v.pos - latency;
+    // A stretch voice reads its input ahead of what is audible by the engine's start length.
+    const double lag = (double) stretchPool[(size_t) v.stretchSlot].startLength (speedValue * fileToHost);
+    return v.reverse ? v.pos + lag : v.pos - lag;
 }
 
 void CutbenchProcessor::padOn (int pad, float velocity)
@@ -410,7 +410,17 @@ void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end,
     {
         slot->stretchSlot = acquireStretchSlot();
         if (slot->stretchSlot >= 0)
-            stretchPool[(size_t) slot->stretchSlot].reset();
+        {
+            // Prime the engine with the first frames of the region, so the sound starts right on the cue point
+            auto& engine = stretchPool[(size_t) slot->stretchSlot];
+            const double ratio = speedValue * fileToHost;
+            engine.setTransposeFactor ((float) (pitchRatio * fileToHost));
+
+            const int n = juce::jlimit (1, kStretchMaxInput, engine.startLength (ratio));
+            const int flushOut = juce::jmax (1, juce::roundToInt ((double) engine.startLength (ratio) / ratio));
+            fillStretchInput (*slot, stretchIn[0].data(), stretchIn[1].data(), n, flushOut);
+            engine.start (stretchIn[0].data(), stretchIn[1].data(), n);
+        }
     }
 }
 
@@ -515,14 +525,55 @@ void CutbenchProcessor::renderClassicVoice (Voice& v, juce::AudioBuffer<float>& 
     }
 }
 
-// Keep Length engine: the stretcher gets source frames at (speed x rate) per output frame and shifts pitch
-// independently of that. It adds latency, so the end of the region is followed by a short flush.
-void CutbenchProcessor::renderStretchVoice (Voice& v, juce::AudioBuffer<float>& out, int startSample, int numSamples)
+// Reads `frames` source frames in playback direction into the stretch input buffers. Outside the region the
+// input is silence, which lets the engine play out its tail after the region ended (the "flush").
+void CutbenchProcessor::fillStretchInput (Voice& v, float* inL, float* inR, int frames, int flushOutFrames)
 {
     const auto& audio = activeSample->audio;
     const float* srcL = audio.getReadPointer (0);
     const float* srcR = audio.getNumChannels() > 1 ? audio.getReadPointer (1) : srcL;
 
+    const double step = v.reverse ? -1.0 : 1.0;
+    const double startPos = (double) v.start;
+    const double endPos = (double) v.end;
+
+    for (int k = 0; k < frames; ++k)
+    {
+        const juce::int64 idx = (juce::int64) v.pos;
+        if (v.pos >= startPos && v.pos < endPos)
+        {
+            inL[k] = srcL[idx];
+            inR[k] = srcR[idx];
+        }
+        else
+        {
+            inL[k] = 0.0f;
+            inR[k] = 0.0f;
+        }
+
+        v.pos += step;
+
+        if (! v.flushing)
+        {
+            const bool past = v.reverse ? (v.pos < startPos) : (v.pos >= endPos);
+            if (past)
+            {
+                if (v.loop && ! v.releasing)
+                    v.pos = v.reverse ? (double) (v.end - 1) : startPos;
+                else
+                {
+                    v.flushing = true;
+                    v.flushLeft = flushOutFrames;
+                }
+            }
+        }
+    }
+}
+
+// Keep Length engine: the stretcher gets source frames at (speed x rate) per output frame and shifts pitch
+// independently of that. After the region ends it is fed silence until its tail has played out.
+void CutbenchProcessor::renderStretchVoice (Voice& v, juce::AudioBuffer<float>& out, int startSample, int numSamples)
+{
     float* outL = out.getWritePointer (0, startSample);
     float* outR = out.getNumChannels() > 1 ? out.getWritePointer (1, startSample) : nullptr;
 
@@ -530,10 +581,7 @@ void CutbenchProcessor::renderStretchVoice (Voice& v, juce::AudioBuffer<float>& 
     engine.setTransposeFactor ((float) (pitchRatio * fileToHost));   // fileToHost compensates a file/host rate mismatch
 
     const double ratio = speedValue * fileToHost;   // source frames consumed per output frame
-    const double step = v.reverse ? -1.0 : 1.0;
-    const int latency = engine.latencySamples();
-    const double startPos = (double) v.start;
-    const double endPos = (double) v.end;
+    const int flushOut = juce::jmax (1, juce::roundToInt ((double) engine.startLength (ratio) / ratio));
 
     float* inL = stretchIn[0].data();
     float* inR = stretchIn[1].data();
@@ -551,39 +599,7 @@ void CutbenchProcessor::renderStretchVoice (Voice& v, juce::AudioBuffer<float>& 
         if (inFrames == kStretchMaxInput)
             v.inFrac = 0.0;
 
-        // Read the next source frames (silence outside the region, so the tail can be flushed out)
-        for (int k = 0; k < inFrames; ++k)
-        {
-            const juce::int64 idx = (juce::int64) v.pos;
-            if ((double) idx >= startPos && (double) idx < endPos)
-            {
-                inL[k] = srcL[idx];
-                inR[k] = srcR[idx];
-            }
-            else
-            {
-                inL[k] = 0.0f;
-                inR[k] = 0.0f;
-            }
-
-            v.pos += step;
-
-            if (! v.flushing)
-            {
-                const bool past = v.reverse ? (v.pos < startPos) : (v.pos >= endPos);
-                if (past)
-                {
-                    if (v.loop && ! v.releasing)
-                        v.pos = v.reverse ? (double) (v.end - 1) : startPos;
-                    else
-                    {
-                        v.flushing = true;
-                        v.flushLeft = latency;
-                    }
-                }
-            }
-        }
-
+        fillStretchInput (v, inL, inR, inFrames, flushOut);
         engine.process (inL, inR, inFrames, tmpL, tmpR, n);
 
         for (int i = 0; i < n; ++i)

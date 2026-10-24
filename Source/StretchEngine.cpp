@@ -26,21 +26,25 @@ void StretchEngine::prepare (double sampleRate)
     impl->stretch.presetDefault (2, (float) sampleRate);
 }
 
-void StretchEngine::reset()
-{
-    if (impl != nullptr)
-        impl->stretch.reset();
-}
-
 void StretchEngine::setTransposeFactor (float factor)
 {
     if (impl != nullptr)
         impl->stretch.setTransposeFactor (factor);
 }
 
-int StretchEngine::latencySamples() const
+int StretchEngine::startLength (double playbackRate) const
 {
-    return impl != nullptr ? (int) (impl->stretch.inputLatency() + impl->stretch.outputLatency()) : 0;
+    return impl != nullptr ? (int) impl->stretch.outputSeekLength ((float) playbackRate) : 0;
+}
+
+void StretchEngine::start (const float* inL, const float* inR, int inFrames)
+{
+    if (impl == nullptr)
+        return;
+
+    const float* channels[2] = { inL, inR };
+    const float** inputs = channels;
+    impl->stretch.outputSeek (inputs, inFrames);   // includes a reset()
 }
 
 void StretchEngine::process (const float* inL, const float* inR, int inFrames, float* outL, float* outR, int outFrames)
@@ -48,8 +52,10 @@ void StretchEngine::process (const float* inL, const float* inR, int inFrames, f
     if (impl == nullptr)
         return;
 
-    const float* inputs[2]  = { inL, inR };
-    float* outputs[2]       = { outL, outR };
+    const float* inChannels[2] = { inL, inR };
+    float* outChannels[2]      = { outL, outR };
+    const float** inputs = inChannels;
+    float** outputs = outChannels;
     impl->stretch.process (inputs, inFrames, outputs, outFrames);
 }
 
@@ -57,9 +63,9 @@ void StretchEngine::process (const float* inL, const float* inR, int inFrames, f
 
 bool StretchEngine::isAvailable() noexcept { return false; }
 void StretchEngine::prepare (double) {}
-void StretchEngine::reset() {}
 void StretchEngine::setTransposeFactor (float) {}
-int  StretchEngine::latencySamples() const { return 0; }
+int  StretchEngine::startLength (double) const { return 0; }
+void StretchEngine::start (const float*, const float*, int) {}
 void StretchEngine::process (const float*, const float*, int, float*, float*, int) {}
 
 #endif

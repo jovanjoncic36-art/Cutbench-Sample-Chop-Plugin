@@ -158,6 +158,7 @@ private:
     void startVoice (int pad, juce::int64 start, juce::int64 end, float velocity, bool preview);
     int  acquireStretchSlot() const;
     double audiblePosition (const Voice&) const;
+    void fillStretchInput (Voice&, float* inL, float* inR, int frames, int flushOutFrames);
     bool advanceEnvelope (Voice&) const;
     void renderVoices (juce::AudioBuffer<float>&, int startSample, int numSamples);
     void renderClassicVoice (Voice&, juce::AudioBuffer<float>&, int startSample, int numSamples);
