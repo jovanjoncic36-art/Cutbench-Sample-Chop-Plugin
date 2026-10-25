@@ -27,7 +27,7 @@ juce_add_plugin(Cutbench
     COMPANY_NAME                "Cutbench"
     PRODUCT_NAME                "Cutbench"
     PLUGIN_MANUFACTURER_CODE    Cbnc
-    PLUGIN_CODE                 Cb01
+    PLUGIN_CODE                 Cb03
     FORMATS                     AU VST3 Standalone
     VST3_CATEGORIES             Instrument Sampler
     IS_SYNTH                    TRUE
