@@ -3,11 +3,13 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PluginProcessor.h"
 #include "Theme.h"
+#include "IconButtons.h"
 #include "WaveformView.h"
 #include "PadGrid.h"
 
 class CutbenchEditor : public juce::AudioProcessorEditor,
                        private juce::ChangeListener,
+                       private juce::Timer,
                        public juce::FileDragAndDropTarget
 {
 public:
@@ -22,7 +24,9 @@ public:
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void timerCallback() override;
     void chooseFile();
+    void openSettings();
     void refreshStatus();
     void nudgePitch (int semitones);
 
@@ -36,7 +40,10 @@ private:
     WaveformView waveform;
     PadGrid padGrid;
 
-    juce::TextButton loadButton { "Load..." }, playButton { "Play" }, stopButton { "Stop" },
+    PlayStopButton playStopButton;
+    GearButton settingsButton;
+
+    juce::TextButton loadButton { "Load..." },
                      setPadButton { "Set Pad" }, clearPadButton { "Clear Pad" }, clearAllButton { "Clear All" },
                      chopButton { "Chop Equal" },
                      zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" },
@@ -45,15 +52,15 @@ private:
 
     juce::Label fileLabel, infoLabel, versionLabel, statusLabel, hintLabel;
     juce::Label pitchLabel, fineLabel, speedLabel, engineLabel, directionLabel, repeatLabel;
-    juce::Label attackLabel, releaseLabel, fadeLabel, gainLabel, noteLabel, modeLabel, padModeLabel;
+    juce::Label attackLabel, releaseLabel, gainLabel, modeLabel, padModeLabel;
 
-    // gainSlider, attackSlider and releaseSlider are rotary knobs, the others are drag bars
-    juce::Slider pitchSlider, fineSlider, speedSlider, attackSlider, releaseSlider,
-                 fadeSlider, gainSlider, noteSlider, chopCountSlider;
+    // gainSlider, attackSlider and releaseSlider are rotary knobs, the others are drag bars.
+    // Base note and declick fade live in the settings menu (the gear button).
+    juce::Slider pitchSlider, fineSlider, speedSlider, attackSlider, releaseSlider, gainSlider, chopCountSlider;
     juce::ComboBox engineBox, modeBox, padModeBox;
 
     std::unique_ptr<SliderAttachment> pitchAttachment, fineAttachment, speedAttachment, attackAttachment,
-                                      releaseAttachment, fadeAttachment, gainAttachment, noteAttachment;
+                                      releaseAttachment, gainAttachment;
     std::unique_ptr<ComboBoxAttachment> engineAttachment, modeAttachment, padModeAttachment;
     std::unique_ptr<ButtonAttachment> reverseAttachment, loopAttachment;
 

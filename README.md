@@ -29,7 +29,7 @@ cmake --build build --config Release
 
 ## How it works
 
-**Pads = cue points.** Pad *n* is played by MIDI note `Base Note + n - 1` (default base note 36 = C1, pad 1
+**Pads = cue points.** Pad *n* is played by MIDI note `Base Note + n - 1` (default base note 36 = C1, set in the settings menu behind the gear button; pad 1
 at the bottom-left of the grid like a Drum Rack). A fresh load puts pad 1 at the start of the file.
 
 **Live chop (the main workflow)**
@@ -56,14 +56,14 @@ that part, in both modes). **Chop Equal** divides the selected region (or the wh
 
 | Control | What it does |
 |---|---|
-| Pitch / Fine Tune | Pitch: -24..+24 semitones, shown as a plain number with [-] / [+] buttons (hold to repeat); the number can also be dragged. Fine Tune: +/-100 cents. Double-click a control to reset it. |
+| Pitch / Fine Tune | Pitch: -24..+24 semitones, shown as a plain number with [-] / [+] buttons (hold to repeat); the number can also be dragged. Fine Tune: +/-100 cents. Double-click Pitch, Fine Tune, Speed or any knob to reset it. |
 | Speed | 0.25x..4x playback speed |
 | Engine: Vinyl | Pitch and speed are linked, like tape or a turntable (speed 2x = one octave up). Cubic-interpolated resampling, cheap, no added latency. Best for tight live chopping. |
 | Engine: Keep Length | Pitch and speed are independent (Signalsmith Stretch). Pitch +5 keeps the duration, speed 0.5x keeps the pitch. Starts right on the cue point (the engine is primed with the first frames), but uses more CPU; at most 8 voices use it, further voices fall back to Vinyl. |
 | Reverse | Plays each region backwards (applies to hits started after switching) |
 | Loop | Repeats the region while the pad sounds (Gate: until key release; One-Shot: until another pad / Stop) |
 | Attack / Release (knobs) | Fade-in on trigger / fade-out on key release (Gate) and at the end of a region. 0 = just the declick fade. The value shows while you drag or hover. |
-| Declick Fade | Short fade (0.5-20 ms) used for cuts, region ends and loop seams |
+| Declick Fade (settings menu) | Short fade (0.5-20 ms) used for cuts, region ends and loop seams |
 | End handle | Select a pad, then drag the grip at the bottom edge of its region to set where it stops. Double-click it to go back to "until the next cue" |
 
 Pitch, speed, Attack, Release and Fade are automatable in Live. Reverse and Loop are read when a pad is triggered.
@@ -72,7 +72,7 @@ Pitch, speed, Attack, Release and Fade are automatable in Live. Reverse and Loop
 |---|---|
 | Load audio | Load... button, or drop a file on the window |
 | Set play start | Click the waveform (cursor) |
-| Play / stop | Play (selection, or cursor to end) / Stop / Space |
+| Play / stop | The round button in the top centre (plays the selection, or from the cursor to the end; shows a stop square while playing), or Space |
 | Set cue at a position | Double-click it (assigns the selected pad, then selects the next empty pad) |
 | Move a cue | Drag its marker line |
 | Play a pad | Click the pad or its flag in the top strip of the waveform |

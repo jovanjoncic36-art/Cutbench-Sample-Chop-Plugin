@@ -92,10 +92,7 @@ void PadGrid::paint (juce::Graphics& g)
             g.drawText (juce::MidiMessage::getMidiNoteName (note, true, true, 3),
                         cell.reduced (8.0f, 6.0f), juce::Justification::bottomLeft, false);
 
-        if (isSet && data != nullptr)
-            g.drawText (Theme::formatTime ((double) pads[(size_t) i].start / data->sampleRate),
-                        cell.reduced (8.0f, 6.0f), juce::Justification::bottomRight, false);
-        else if (! isSet)
+        if (! isSet)
             g.drawText ("empty", cell.reduced (8.0f, 6.0f), juce::Justification::topRight, false);
     }
 }
