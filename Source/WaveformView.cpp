@@ -352,31 +352,35 @@ void WaveformView::paint (juce::Graphics& g)
     g.setColour (Theme::grid);
     g.drawHorizontalLine (body.getCentreY(), 0.0f, w);
 
-    // Region of the selected pad (from its cue to where it will stop)
-    if (selectedPad >= 0 && pads[(size_t) selectedPad].isSet())
+    // Every chop is tinted in its pad colour (from its cue to where it stops); the selected one is brighter
+    const auto ends = proc.getEffectiveEnds();
+    for (int i = 0; i < kNumPads; ++i)
     {
-        const juce::int64 end = proc.getEffectiveEnd (selectedPad);
-        if (end > pads[(size_t) selectedPad].start)
-        {
-            const float x0 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) pads[(size_t) selectedPad].start));
-            const float x1 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) end));
-            g.setColour (Theme::padColour (selectedPad).withAlpha (0.14f));
-            g.fillRect (x0, (float) body.getY(), juce::jmax (0.0f, x1 - x0), (float) body.getHeight());
+        if (! pads[(size_t) i].isSet() || ends[(size_t) i] <= pads[(size_t) i].start)
+            continue;
 
-            // End handle: a line plus a grip at the bottom edge
-            const float ex = sampleToX ((double) end);
-            if (ex >= 0.0f && ex <= w)
-            {
-                const auto colour = Theme::padColour (selectedPad);
-                g.setColour (colour.withAlpha (0.7f));
-                g.drawLine (ex, (float) body.getY(), ex, (float) body.getBottom(), 1.0f);
-                g.setColour (colour);
-                g.fillRect (ex - 5.0f, (float) body.getBottom() - 16.0f, 10.0f, 16.0f);
-            }
-        }
+        const float x0 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) pads[(size_t) i].start));
+        const float x1 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) ends[(size_t) i]));
+        g.setColour (Theme::padColour (i).withAlpha (i == selectedPad ? 0.30f : 0.17f));
+        g.fillRect (x0, (float) body.getY(), juce::jmax (0.0f, x1 - x0), (float) body.getHeight());
     }
 
     drawWaveform (g, body);
+
+    // End handle of the selected pad: a line plus a grip at the bottom edge
+    if (selectedPad >= 0 && pads[(size_t) selectedPad].isSet()
+        && ends[(size_t) selectedPad] > pads[(size_t) selectedPad].start)
+    {
+        const float ex = sampleToX ((double) ends[(size_t) selectedPad]);
+        if (ex >= 0.0f && ex <= w)
+        {
+            const auto colour = Theme::padColour (selectedPad);
+            g.setColour (colour.withAlpha (0.7f));
+            g.drawLine (ex, (float) body.getY(), ex, (float) body.getBottom(), 1.0f);
+            g.setColour (colour);
+            g.fillRect (ex - 5.0f, (float) body.getBottom() - 16.0f, 10.0f, 16.0f);
+        }
+    }
 
     // Region selection
     if (auto sel = getSelection())

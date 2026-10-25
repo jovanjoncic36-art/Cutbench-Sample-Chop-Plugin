@@ -23,9 +23,9 @@
                          and playback simply continues.
 
     Playback engines (per voice)
-      Classic     : resampling with cubic interpolation. Pitch and speed are linked (tape / turntable style).
+      Vinyl     : resampling with cubic interpolation. Pitch and speed are linked (tape / turntable style).
       Keep Length : Signalsmith Stretch. Pitch and speed are independent. Costs CPU and adds some latency,
-                    so the number of such voices is limited (kStretchSlots); extra voices fall back to Classic.
+                    so the number of such voices is limited (kStretchSlots); extra voices fall back to Vinyl.
 
     Threading
       Audio thread : never locks or allocates. Reads `audioSample`, the pad atomics, the UI command FIFO
@@ -42,6 +42,7 @@ public:
     static constexpr int kStretchMaxInput = kStretchChunk * 32;  // input frames per stretch call
     static constexpr juce::int64 kMinRegionLength = 64;          // frames
     using PadArray = std::array<Pad, kNumPads>;
+    using EndArray = std::array<juce::int64, kNumPads>;
 
     CutbenchProcessor();
     ~CutbenchProcessor() override;
@@ -90,9 +91,10 @@ public:
     void clearPadEnd (int pad);                                  // back to the automatic end
     void clearPad (int pad);
     void clearAllPads();
-    void chopEqual (int numPads);                                // pads 1..N = N equal regions
+    void chopEqual (int numPads, juce::int64 from, juce::int64 to);   // pads 1..N = N equal regions inside [from, to); to < 0 = end of file
     juce::int64 movePadStart (int pad, juce::int64 newPosition); // returns the applied position
     juce::int64 getEffectiveEnd (int pad) const;                 // -1 if the pad is empty
+    EndArray getEffectiveEnds() const;                           // all pads at once (-1 = empty)
     int nextEmptyPad (int after) const;                          // first empty pad after `after` (wraps), or -1
 
     // Play controls (executed on the audio thread via a lock-free queue)
@@ -110,10 +112,10 @@ private:
         bool active = false, releasing = false, preview = false;
         bool reverse = false, loop = false, flushing = false;
         int pad = -1;
-        int stretchSlot = -1;          // index into stretchPool, or -1 for the Classic engine
+        int stretchSlot = -1;          // index into stretchPool, or -1 for the Vinyl engine
         int flushLeft = 0;             // stretch engine: output frames left after the region ended
         double pos = 0.0;              // source frame position (fractional; integer-valued for stretch voices)
-        double curRate = 1.0;          // smoothed source frames per output frame (Classic engine)
+        double curRate = 1.0;          // smoothed source frames per output frame (Vinyl engine)
         double inFrac = 0.0;           // stretch engine: fractional input frames carried between calls
         juce::int64 start = 0, end = 0;
         float env = 0.0f, gain = 1.0f, relInc = 0.0f, wrapRamp = 1.0f;
@@ -161,7 +163,7 @@ private:
     void fillStretchInput (Voice&, float* inL, float* inR, int frames, int flushOutFrames);
     bool advanceEnvelope (Voice&) const;
     void renderVoices (juce::AudioBuffer<float>&, int startSample, int numSamples);
-    void renderClassicVoice (Voice&, juce::AudioBuffer<float>&, int startSample, int numSamples);
+    void renderVinylVoice (Voice&, juce::AudioBuffer<float>&, int startSample, int numSamples);
     void renderStretchVoice (Voice&, juce::AudioBuffer<float>&, int startSample, int numSamples);
 
     // ---- message-thread state ----

@@ -24,7 +24,7 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void chooseFile();
     void refreshStatus();
-    void resetPitch();
+    void nudgePitch (int semitones);
 
     using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
@@ -40,12 +40,14 @@ private:
                      setPadButton { "Set Pad" }, clearPadButton { "Clear Pad" }, clearAllButton { "Clear All" },
                      chopButton { "Chop Equal" },
                      zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" },
-                     reverseButton { "Reverse" }, loopButton { "Loop" }, resetPitchButton { "Reset Pitch" };
+                     reverseButton { "Reverse" }, loopButton { "Loop" },
+                     pitchDownButton { "-" }, pitchUpButton { "+" };
 
     juce::Label fileLabel, infoLabel, versionLabel, statusLabel, hintLabel;
-    juce::Label pitchLabel, fineLabel, speedLabel, engineLabel, directionLabel, repeatLabel, resetLabel;
+    juce::Label pitchLabel, fineLabel, speedLabel, engineLabel, directionLabel, repeatLabel;
     juce::Label attackLabel, releaseLabel, fadeLabel, gainLabel, noteLabel, modeLabel, padModeLabel;
 
+    // gainSlider, attackSlider and releaseSlider are rotary knobs, the others are drag bars
     juce::Slider pitchSlider, fineSlider, speedSlider, attackSlider, releaseSlider,
                  fadeSlider, gainSlider, noteSlider, chopCountSlider;
     juce::ComboBox engineBox, modeBox, padModeBox;

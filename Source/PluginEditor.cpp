@@ -1,4 +1,6 @@
 #include "PluginEditor.h"
+#include <functional>
+#include <vector>
 
 namespace
 {
@@ -18,20 +20,27 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     addAndMakeVisible (padGrid);
     for (auto* b : { &loadButton, &playButton, &stopButton, &setPadButton, &clearPadButton, &clearAllButton,
                      &chopButton, &zoomInButton, &zoomOutButton, &fitButton,
-                     &reverseButton, &loopButton, &resetPitchButton })
+                     &reverseButton, &loopButton, &pitchDownButton, &pitchUpButton })
         addAndMakeVisible (*b);
     for (auto* l : { &fileLabel, &infoLabel, &versionLabel, &statusLabel, &hintLabel,
-                     &pitchLabel, &fineLabel, &speedLabel, &engineLabel, &directionLabel, &repeatLabel, &resetLabel,
+                     &pitchLabel, &fineLabel, &speedLabel, &engineLabel, &directionLabel, &repeatLabel,
                      &attackLabel, &releaseLabel, &fadeLabel, &gainLabel, &noteLabel, &modeLabel, &padModeLabel })
         addAndMakeVisible (*l);
     for (auto* s : { &pitchSlider, &fineSlider, &speedSlider, &attackSlider, &releaseSlider,
                      &fadeSlider, &gainSlider, &noteSlider, &chopCountSlider })
-    {
-        s->setSliderStyle (juce::Slider::LinearBar);
         addAndMakeVisible (*s);
-    }
     for (auto* c : { &engineBox, &modeBox, &padModeBox })
         addAndMakeVisible (*c);
+
+    // Drag bars (linear) vs. knobs (rotary, value shown while dragging or hovering)
+    for (auto* s : { &pitchSlider, &fineSlider, &speedSlider, &fadeSlider, &noteSlider, &chopCountSlider })
+        s->setSliderStyle (juce::Slider::LinearBar);
+    for (auto* k : { &gainSlider, &attackSlider, &releaseSlider })
+    {
+        k->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        k->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        k->setPopupDisplayEnabled (true, true, this, 1500);
+    }
 
     // --- labels ---
     auto small = [] (juce::Label& l, const juce::String& text, juce::Justification j = juce::Justification::centredLeft)
@@ -41,17 +50,16 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
         l.setFont (l.getFont().withHeight (12.0f));
         l.setJustificationType (j);
     };
+    small (attackLabel, "ATTACK", juce::Justification::centred);
+    small (releaseLabel, "RELEASE", juce::Justification::centred);
+    small (gainLabel, "GAIN", juce::Justification::centred);
     small (pitchLabel, "PITCH");
     small (fineLabel, "FINE TUNE");
     small (speedLabel, "SPEED");
     small (engineLabel, StretchEngine::isAvailable() ? "ENGINE" : "ENGINE (Keep Length n/a)");
     small (directionLabel, "DIRECTION");
     small (repeatLabel, "REPEAT");
-    small (resetLabel, "PITCH");
-    small (attackLabel, "ATTACK");
-    small (releaseLabel, "RELEASE");
     small (fadeLabel, "DECLICK FADE");
-    small (gainLabel, "GAIN");
     small (noteLabel, "BASE NOTE (PAD 1)");
     small (modeLabel, "PLAY MODE");
     small (padModeLabel, "VOICES");
@@ -77,7 +85,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     gainAttachment    = std::make_unique<SliderAttachment> (apvts, "gain", gainSlider);
     noteAttachment    = std::make_unique<SliderAttachment> (apvts, "baseNote", noteSlider);
 
-    engineBox.addItemList ({ "Classic", "Keep Length" }, 1);
+    engineBox.addItemList ({ "Vinyl", "Keep Length" }, 1);
     engineAttachment = std::make_unique<ComboBoxAttachment> (apvts, "engine", engineBox);
     if (! StretchEngine::isAvailable())
         engineBox.setItemEnabled (2, false);   // this build was made without the time-stretch library
@@ -98,7 +106,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     chopCountSlider.setTextValueSuffix (" pads");
 
     // The attachments install their own text functions, so ours go after them.
-    pitchSlider.textFromValueFunction   = [] (double v) { return signedInt (v) + " st"; };
+    pitchSlider.textFromValueFunction   = [] (double v) { return signedInt (v); };   // just the number
     fineSlider.textFromValueFunction    = [] (double v) { return (v > 0.05 ? "+" : "") + juce::String (v, 1) + " ct"; };
     speedSlider.textFromValueFunction   = [] (double v) { return juce::String (v, 2) + "x"; };
     attackSlider.textFromValueFunction  = [] (double v) { return juce::String (v, v < 10.0 ? 1 : 0) + " ms"; };
@@ -122,19 +130,34 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     setPadButton.onClick     = [this] { waveform.assignToSelectedPad(); };
     clearPadButton.onClick   = [this] { proc.clearPad (proc.getSelectedPad()); };
     clearAllButton.onClick   = [this] { proc.clearAllPads(); };
-    chopButton.onClick       = [this] { proc.chopEqual ((int) chopCountSlider.getValue()); };
     zoomInButton.onClick     = [this] { waveform.zoomBy (0.5); };
     zoomOutButton.onClick    = [this] { waveform.zoomBy (2.0); };
     fitButton.onClick        = [this] { waveform.zoomToFit(); };
-    resetPitchButton.onClick = [this] { resetPitch(); };
+
+    // Chop Equal divides the selected region, or the whole sample when nothing is selected
+    chopButton.onClick = [this]
+    {
+        const auto selection = waveform.getSelection();
+        proc.chopEqual ((int) chopCountSlider.getValue(),
+                        selection ? selection->first : 0,
+                        selection ? selection->second : -1);
+    };
+
+    pitchDownButton.onClick = [this] { nudgePitch (-1); };
+    pitchUpButton.onClick   = [this] { nudgePitch (+1); };
+    for (auto* b : { &pitchDownButton, &pitchUpButton })
+    {
+        b->setTriggeredOnMouseDown (true);
+        b->setRepeatSpeed (400, 90);   // hold to keep stepping
+    }
 
     waveform.onViewStateChanged = [this] { refreshStatus(); };
 
     proc.addChangeListener (this);
 
     setResizable (true, true);
-    setResizeLimits (900, 520, 2400, 1400);
-    setSize (1100, 700);
+    setResizeLimits (900, 560, 2400, 1400);
+    setSize (1100, 720);
 
     changeListenerCallback (nullptr);   // initial sync
 }
@@ -145,15 +168,17 @@ CutbenchEditor::~CutbenchEditor()
     setLookAndFeel (nullptr);
 }
 
-void CutbenchEditor::resetPitch()
+void CutbenchEditor::nudgePitch (int semitones)
 {
-    for (const char* id : { "pitch", "fine" })
-        if (auto* parameter = proc.apvts.getParameter (id))
-        {
-            parameter->beginChangeGesture();
-            parameter->setValueNotifyingHost (parameter->getDefaultValue());
-            parameter->endChangeGesture();
-        }
+    if (auto* parameter = proc.apvts.getParameter ("pitch"))
+    {
+        const float current = parameter->convertFrom0to1 (parameter->getValue());
+        const float target = juce::jlimit (-24.0f, 24.0f, current + (float) semitones);
+
+        parameter->beginChangeGesture();
+        parameter->setValueNotifyingHost (parameter->convertTo0to1 (target));
+        parameter->endChangeGesture();
+    }
 }
 
 void CutbenchEditor::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -224,9 +249,15 @@ void CutbenchEditor::resized()
 {
     auto r = getLocalBounds().reduced (12);
 
-    // top bar
-    auto top = r.removeFromTop (30);
-    loadButton.setBounds (top.removeFromLeft (96));
+    // top bar: Load, file name, version, BPM/key placeholder, and the GAIN knob in the top right corner
+    auto top = r.removeFromTop (52);
+    {
+        auto gainColumn = top.removeFromRight (60);
+        gainLabel.setBounds (gainColumn.removeFromBottom (14));
+        gainSlider.setBounds (gainColumn.withSizeKeepingCentre (36, 36));
+        top.removeFromRight (10);
+    }
+    loadButton.setBounds (top.removeFromLeft (96).withSizeKeepingCentre (96, 30));
     top.removeFromLeft (12);
     infoLabel.setBounds (top.removeFromRight (150));
     versionLabel.setBounds (top.removeFromRight (230));
@@ -239,8 +270,8 @@ void CutbenchEditor::resized()
     statusLabel.setBounds (statusRow);
     r.removeFromBottom (6);
 
-    // controls: buttons row + two rows of parameters
-    controlsArea = r.removeFromBottom (146);
+    // controls: buttons row, knob/pitch row, parameter row
+    controlsArea = r.removeFromBottom (160);
     r.removeFromBottom (10);
 
     // pad grid on the right, waveform takes everything else
@@ -274,30 +305,52 @@ void CutbenchEditor::resized()
     place (chopButton, 90);
     place (chopCountSlider, 100);
 
-    // Parameter rows: equal columns, a small label above each control
-    const int gap = 12;
-    using Item = std::pair<juce::Label*, juce::Component*>;
-    auto layoutRow = [gap] (juce::Rectangle<int> row, std::initializer_list<Item> items)
+    // Parameter rows: equal columns, the control on top and its label below it
+    using Place = std::function<void (juce::Rectangle<int>)>;
+    struct Cell { juce::Label* label; Place place; };
+
+    auto bar  = [] (juce::Component& comp) -> Place
     {
-        const int colW = (row.getWidth() - ((int) items.size() - 1) * gap) / (int) items.size();
-        for (const auto& item : items)
+        return [&comp] (juce::Rectangle<int> zone) { comp.setBounds (zone.withSizeKeepingCentre (zone.getWidth(), 24)); };
+    };
+    auto knob = [] (juce::Component& comp) -> Place
+    {
+        return [&comp] (juce::Rectangle<int> zone)
+        {
+            const int d = juce::jmin (44, zone.getWidth(), zone.getHeight());
+            comp.setBounds (zone.withSizeKeepingCentre (d, d));
+        };
+    };
+
+    const int gap = 12;
+    auto layoutRow = [gap] (juce::Rectangle<int> row, int zoneHeight, const std::vector<Cell>& cells)
+    {
+        const int colW = (row.getWidth() - ((int) cells.size() - 1) * gap) / (int) cells.size();
+        for (const auto& cell : cells)
         {
             auto col = row.removeFromLeft (colW);
             row.removeFromLeft (gap);
-            item.first->setBounds (col.removeFromTop (16));
-            item.second->setBounds (col.removeFromTop (24));
+            cell.place (col.removeFromTop (zoneHeight));
+            cell.label->setBounds (col.removeFromTop (14));
         }
     };
 
-    auto rowB = c.removeFromTop (40);
-    c.removeFromTop (6);
-    layoutRow (rowB, { Item { &pitchLabel, &pitchSlider },   Item { &fineLabel, &fineSlider },
-                       Item { &speedLabel, &speedSlider },   Item { &engineLabel, &engineBox },
-                       Item { &directionLabel, &reverseButton }, Item { &repeatLabel, &loopButton },
-                       Item { &resetLabel, &resetPitchButton } });
+    // pitch: [-] number [+]
+    Place pitchPlace = [this] (juce::Rectangle<int> zone)
+    {
+        auto z = zone.withSizeKeepingCentre (zone.getWidth(), 24);
+        pitchDownButton.setBounds (z.removeFromLeft (26));
+        pitchUpButton.setBounds (z.removeFromRight (26));
+        pitchSlider.setBounds (z.reduced (3, 0));
+    };
 
-    layoutRow (c.removeFromTop (40), { Item { &attackLabel, &attackSlider }, Item { &releaseLabel, &releaseSlider },
-                                       Item { &fadeLabel, &fadeSlider },     Item { &gainLabel, &gainSlider },
-                                       Item { &noteLabel, &noteSlider },     Item { &modeLabel, &modeBox },
-                                       Item { &padModeLabel, &padModeBox } });
+    auto rowB = c.removeFromTop (44 + 14);
+    c.removeFromTop (4);
+    layoutRow (rowB, 44, { { &attackLabel, knob (attackSlider) },   { &releaseLabel, knob (releaseSlider) },
+                           { &pitchLabel, pitchPlace },             { &fineLabel, bar (fineSlider) },
+                           { &speedLabel, bar (speedSlider) },      { &engineLabel, bar (engineBox) },
+                           { &directionLabel, bar (reverseButton) }, { &repeatLabel, bar (loopButton) } });
+
+    layoutRow (c.removeFromTop (26 + 14), 26, { { &fadeLabel, bar (fadeSlider) },   { &noteLabel, bar (noteSlider) },
+                                                { &modeLabel, bar (modeBox) },      { &padModeLabel, bar (padModeBox) } });
 }

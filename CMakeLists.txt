@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal binary (Apple Silicon + Intel)")
 
-project(Cutbench VERSION 0.3.0 LANGUAGES C CXX)
+project(Cutbench VERSION 0.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -59,7 +59,7 @@ target_link_libraries(Cutbench
         juce::juce_recommended_warning_flags)
 
 # Independent pitch / time-stretch engine: Signalsmith Stretch + Signalsmith Linear (both header-only, MIT).
-# Switch off with -DCUTBENCH_STRETCH=OFF; the plugin then runs with the "Classic" engine only.
+# Switch off with -DCUTBENCH_STRETCH=OFF; the plugin then runs with the "Vinyl" engine only.
 option(CUTBENCH_STRETCH    "Enable the Signalsmith Stretch engine (Keep Length mode)" ON)
 option(CUTBENCH_ACCELERATE "Use Apple Accelerate for the stretch engine's FFTs (macOS)" ON)
 

@@ -59,5 +59,9 @@ public:
         setColour (juce::PopupMenu::highlightedBackgroundColourId, Theme::accent.darker (0.4f));
 
         setColour (juce::ScrollBar::thumbColourId, Theme::accent.withAlpha (0.55f));
+
+        setColour (juce::Slider::rotarySliderFillColourId,    Theme::accent);
+        setColour (juce::Slider::rotarySliderOutlineColourId, Theme::panelHi);
+        setColour (juce::Slider::thumbColourId,               Theme::text);
     }
 };

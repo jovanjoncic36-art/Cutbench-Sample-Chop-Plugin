@@ -41,10 +41,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout CutbenchProcessor::createLay
     speedRange.setSkewForCentre (1.0f);
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "speed", 1 }, "Speed", speedRange, 1.0f));
 
-    // Classic     : pitch and speed are linked (tape style), cheap
+    // Vinyl     : pitch and speed are linked (tape style), cheap
     // Keep Length : pitch and speed are independent (time-stretch engine), needs more CPU
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "engine", 1 }, "Engine",
-                                                        StringArray { "Classic", "Keep Length" }, 0));
+                                                        StringArray { "Vinyl", "Keep Length" }, 0));
 
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "reverse", 1 }, "Reverse", false));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "loop", 1 }, "Loop", false));
@@ -362,7 +362,7 @@ int CutbenchProcessor::acquireStretchSlot() const
         if (! used)
             return s;
     }
-    return -1;   // pool exhausted: the voice falls back to the Classic engine
+    return -1;   // pool exhausted: the voice falls back to the Vinyl engine
 }
 
 void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end, float velocity, bool preview)
@@ -455,12 +455,12 @@ void CutbenchProcessor::renderVoices (juce::AudioBuffer<float>& out, int startSa
         if (v.stretchSlot >= 0)
             renderStretchVoice (v, out, startSample, numSamples);
         else
-            renderClassicVoice (v, out, startSample, numSamples);
+            renderVinylVoice (v, out, startSample, numSamples);
     }
 }
 
-// Classic engine: cubic-interpolated resampling. Pitch and speed together set one playback rate.
-void CutbenchProcessor::renderClassicVoice (Voice& v, juce::AudioBuffer<float>& out, int startSample, int numSamples)
+// Vinyl engine: cubic-interpolated resampling. Pitch and speed together set one playback rate.
+void CutbenchProcessor::renderVinylVoice (Voice& v, juce::AudioBuffer<float>& out, int startSample, int numSamples)
 {
     const auto& audio = activeSample->audio;
     const float* srcL = audio.getReadPointer (0);
@@ -964,19 +964,27 @@ void CutbenchProcessor::clearAllPads()
     bumpPadVersion();
 }
 
-void CutbenchProcessor::chopEqual (int numPads)
+void CutbenchProcessor::chopEqual (int numPads, juce::int64 from, juce::int64 to)
 {
     const juce::int64 len = currentLength();
     if (len <= kMinRegionLength)
         return;
 
-    const int n = juce::jlimit (1, kNumPads, numPads);
+    // The range to divide: the given selection, or the whole sample when `to` is negative
+    from = juce::jlimit<juce::int64> (0, len, from);
+    to   = (to < 0) ? len : juce::jlimit<juce::int64> (0, len, to);
+    if (to - from < kMinRegionLength)
+        return;
+
+    const juce::int64 span = to - from;
+    const int n = juce::jlimit (1, kNumPads, (int) juce::jmin<juce::int64> (numPads, span / kMinRegionLength));
+
     for (int i = 0; i < kNumPads; ++i)
     {
         if (i < n)
         {
-            padStart[(size_t) i].store ((len * i) / n);
-            padEnd[(size_t) i].store ((len * (i + 1)) / n);
+            padStart[(size_t) i].store (from + (span * i) / n);
+            padEnd[(size_t) i].store (from + (span * (i + 1)) / n);
         }
         else
         {
@@ -1030,6 +1038,21 @@ juce::int64 CutbenchProcessor::getEffectiveEnd (int pad) const
     if (pad < 0 || pad >= kNumPads || len <= 0 || padStart[(size_t) pad].load() < 0)
         return -1;
     return resolveEnd (pad, len);
+}
+
+CutbenchProcessor::EndArray CutbenchProcessor::getEffectiveEnds() const
+{
+    EndArray ends;
+    ends.fill (-1);
+
+    const juce::int64 len = currentLength();
+    if (len <= 0)
+        return ends;
+
+    for (int i = 0; i < kNumPads; ++i)
+        if (padStart[(size_t) i].load() >= 0)
+            ends[(size_t) i] = resolveEnd (i, len);
+    return ends;
 }
 
 int CutbenchProcessor::nextEmptyPad (int after) const
