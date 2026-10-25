@@ -230,7 +230,7 @@ void CutbenchEditor::timerCallback()
 
 void CutbenchEditor::openSettings()
 {
-    juce::CallOutBox::launchAsync (std::make_unique<SettingsPanel> (proc.apvts), settingsButton.getBounds(), this);
+    juce::CallOutBox::launchAsynchronously (std::make_unique<SettingsPanel> (proc.apvts), settingsButton.getBounds(), this);
 }
 
 void CutbenchEditor::nudgePitch (int semitones)
