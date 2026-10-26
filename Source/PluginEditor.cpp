@@ -75,20 +75,21 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     addAndMakeVisible (playStopButton);
     addAndMakeVisible (settingsButton);
     for (auto* b : { &loadButton, &setPadButton, &clearPadButton, &clearAllButton,
-                     &chopButton, &zoomInButton, &zoomOutButton, &fitButton,
+                     &chopButton, &autoSliceButton, &snapButton, &zoomInButton, &zoomOutButton, &fitButton,
                      &reverseButton, &loopButton, &pitchDownButton, &pitchUpButton })
         addAndMakeVisible (*b);
     for (auto* l : { &fileLabel, &infoLabel, &versionLabel, &statusLabel, &hintLabel,
                      &pitchLabel, &fineLabel, &speedLabel, &engineLabel, &directionLabel, &repeatLabel,
                      &attackLabel, &releaseLabel, &gainLabel, &modeLabel, &padModeLabel })
         addAndMakeVisible (*l);
-    for (auto* s : { &pitchSlider, &fineSlider, &speedSlider, &attackSlider, &releaseSlider, &gainSlider, &chopCountSlider })
+    for (auto* s : { &pitchSlider, &fineSlider, &speedSlider, &attackSlider, &releaseSlider, &gainSlider,
+                     &chopCountSlider, &sensitivitySlider })
         addAndMakeVisible (*s);
     for (auto* c : { &engineBox, &modeBox, &padModeBox })
         addAndMakeVisible (*c);
 
     // Drag bars draw their own value text (no text box), so drag and double-click-to-reset always work.
-    for (auto* s : { &pitchSlider, &fineSlider, &speedSlider, &chopCountSlider })
+    for (auto* s : { &pitchSlider, &fineSlider, &speedSlider, &chopCountSlider, &sensitivitySlider })
     {
         s->setSliderStyle (juce::Slider::LinearBar);
         s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -137,6 +138,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     attackAttachment  = std::make_unique<SliderAttachment> (apvts, "attackMs", attackSlider);
     releaseAttachment = std::make_unique<SliderAttachment> (apvts, "releaseMs", releaseSlider);
     gainAttachment    = std::make_unique<SliderAttachment> (apvts, "gain", gainSlider);
+    sensitivityAttachment = std::make_unique<SliderAttachment> (apvts, "sensitivity", sensitivitySlider);
 
     engineBox.addItemList ({ "Vinyl", "Keep Length" }, 1);
     engineAttachment = std::make_unique<ComboBoxAttachment> (apvts, "engine", engineBox);
@@ -149,8 +151,9 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     padModeBox.addItemList ({ "Mono", "Poly" }, 1);
     padModeAttachment = std::make_unique<ComboBoxAttachment> (apvts, "padMode", padModeBox);
 
-    for (auto* b : { &reverseButton, &loopButton })
+    for (auto* b : { &reverseButton, &loopButton, &snapButton })
         b->setClickingTogglesState (true);
+    snapAttachment = std::make_unique<ButtonAttachment> (apvts, "snap", snapButton);
     reverseAttachment = std::make_unique<ButtonAttachment> (apvts, "reverse", reverseButton);
     loopAttachment    = std::make_unique<ButtonAttachment> (apvts, "loop", loopButton);
 
@@ -165,6 +168,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     attackSlider.setDoubleClickReturnValue (true, 0.0);
     releaseSlider.setDoubleClickReturnValue (true, 0.0);
     gainSlider.setDoubleClickReturnValue (true, 0.0);
+    sensitivitySlider.setDoubleClickReturnValue (true, 0.5);
 
     // The attachments install their own text functions, so ours go after them.
     pitchSlider.textFromValueFunction   = [] (double v) { return signedInt (v); };   // just the number
@@ -172,6 +176,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     speedSlider.textFromValueFunction   = [] (double v) { return juce::String (v, 2) + "x"; };
     attackSlider.textFromValueFunction  = [] (double v) { return juce::String (v, v < 10.0 ? 1 : 0) + " ms"; };
     releaseSlider.textFromValueFunction = [] (double v) { return juce::String (v, v < 10.0 ? 1 : 0) + " ms"; };
+    sensitivitySlider.textFromValueFunction = [] (double v) { return "Sens " + juce::String (juce::roundToInt (v * 100.0)) + "%"; };
     gainSlider.textFromValueFunction    = [] (double v) { return v <= -59.95 ? juce::String ("-inf dB") : juce::String (v, 1) + " dB"; };
 
     // --- buttons ---
@@ -190,6 +195,16 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     {
         const auto selection = waveform.getSelection();
         proc.chopEqual ((int) chopCountSlider.getValue(),
+                        selection ? selection->first : 0,
+                        selection ? selection->second : -1);
+    };
+
+    // Auto Slice puts cues on the detected transients of the selected region (or of the whole sample), at most
+    // as many as the pad count next to Chop Equal; Sens sets how weak a hit may be and still count
+    autoSliceButton.onClick = [this]
+    {
+        const auto selection = waveform.getSelection();
+        proc.autoSlice ((int) chopCountSlider.getValue(),
                         selection ? selection->first : 0,
                         selection ? selection->second : -1);
     };
@@ -438,11 +453,14 @@ void CutbenchEditor::resized()
         comp.setBounds (row1.removeFromLeft (width));
         row1.removeFromLeft (gapAfter);
     };
-    place (setPadButton, 80);
-    place (clearPadButton, 86);
-    place (clearAllButton, 80, 18);
-    place (chopButton, 90);
-    place (chopCountSlider, 100);
+    place (setPadButton, 76);
+    place (clearPadButton, 80);
+    place (clearAllButton, 76, 12);
+    place (chopButton, 84);
+    place (chopCountSlider, 84, 12);
+    place (autoSliceButton, 84);
+    place (sensitivitySlider, 92);
+    place (snapButton, 52);
 
     // Parameter row: columns sized by weight, the control on top and its label below it
     using Place = std::function<void (juce::Rectangle<int>)>;

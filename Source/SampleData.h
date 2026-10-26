@@ -15,6 +15,14 @@ struct Pad
     bool isSet() const noexcept { return start >= 0; }
 };
 
+// A detected onset (drum hit / sudden change). strength is 0..1: how far the level jumps above what came just
+// before it (30 dB or more = 1).
+struct Transient
+{
+    juce::int64 position = 0;
+    float strength = 0.0f;
+};
+
 // Decoded audio held in memory (1 or 2 channels, float) plus a min/max peak cache for drawing.
 // Built on a background thread, then treated as immutable (shared via shared_ptr<const>).
 struct SampleData
@@ -26,11 +34,13 @@ struct SampleData
     juce::File file;
     juce::String name;
     std::vector<float> peakMin, peakMax;
+    std::vector<Transient> transients;   // sorted by position
 
     int numFrames() const noexcept   { return audio.getNumSamples(); }
     int numChannels() const noexcept { return audio.getNumChannels(); }
 
     void buildPeaks();
+    void findTransients();   // fills `transients`; runs once on the loader thread
 
     // Min/max over [startSample, endSample) across all channels. Safe for any input range.
     void getMinMax (double startSample, double endSample, float& minOut, float& maxOut) const;

@@ -84,6 +84,8 @@ public:
     int  getSelectedPad() const noexcept { return selectedPad.load (std::memory_order_relaxed); }
     void setSelectedPad (int pad);
     int  getBaseNote() const noexcept { return juce::roundToInt (baseNoteParam->load()); }
+    // Transients weaker than this are ignored (Auto Slice, Snap, and the ticks in the waveform). 0.9 .. 0.02
+    float getTransientThreshold() const noexcept { return 0.02f + 0.9f * (1.0f - sensitivityParam->load()); }
 
     void setPadStart (int pad, juce::int64 position);            // cue point, automatic end
     void setPadRegion (int pad, juce::int64 start, juce::int64 end);
@@ -91,6 +93,7 @@ public:
     void clearPadEnd (int pad);                                  // back to the automatic end
     void clearPad (int pad);
     void clearAllPads();
+    void autoSlice (int maxPads, juce::int64 from, juce::int64 to);   // cues on the detected transients inside [from, to); to < 0 = end of file
     void chopEqual (int numPads, juce::int64 from, juce::int64 to);   // pads 1..N = N equal regions inside [from, to); to < 0 = end of file
     juce::int64 movePadStart (int pad, juce::int64 newPosition); // returns the applied position
     juce::int64 getEffectiveEnd (int pad) const;                 // -1 if the pad is empty
@@ -198,6 +201,8 @@ private:
     std::atomic<float>* loopParam = nullptr;
     std::atomic<float>* attackParam = nullptr;
     std::atomic<float>* releaseParam = nullptr;
+    std::atomic<float>* sensitivityParam = nullptr;
+    std::atomic<float>* snapParam = nullptr;
 
     // ---- audio-thread-only state ----
     const SampleData* activeSample = nullptr;

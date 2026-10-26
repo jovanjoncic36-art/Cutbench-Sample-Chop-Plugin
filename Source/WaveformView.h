@@ -87,6 +87,7 @@ private:
     CutbenchProcessor::PadArray pads;
     int selectedPad = 0;
     juce::uint32 seenPadVersion = ~(juce::uint32) 0;
+    float seenThreshold = -1.0f;
 
     double viewStart = 0.0;
     double samplesPerPixel = 1.0;

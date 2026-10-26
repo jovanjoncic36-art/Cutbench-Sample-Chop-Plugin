@@ -1,5 +1,6 @@
 #include "WaveformView.h"
 #include "Theme.h"
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -78,6 +79,13 @@ void WaveformView::timerCallback()
     if (proc.getPadVersion() != seenPadVersion)
     {
         refreshPads();
+        needsRepaint = true;
+    }
+
+    const float threshold = proc.getTransientThreshold();   // changes when the Sens control moves
+    if (threshold != seenThreshold)
+    {
+        seenThreshold = threshold;
         needsRepaint = true;
     }
 
@@ -389,6 +397,28 @@ void WaveformView::paint (juce::Graphics& g)
         const float x1 = juce::jlimit (-2.0f, w + 2.0f, sampleToX ((double) sel->second));
         g.setColour (juce::Colours::white.withAlpha (0.16f));
         g.fillRect (x0, (float) area.getY(), x1 - x0, (float) area.getHeight());
+    }
+
+    // Faint ticks at the detected transients: the ones Auto Slice and Snap use (they follow the Sens setting)
+    {
+        const auto& t = data->transients;
+        const float threshold = proc.getTransientThreshold();
+        auto it = std::lower_bound (t.begin(), t.end(), (juce::int64) xToSample (-2.0f),
+                                    [] (const Transient& a, juce::int64 p) { return a.position < p; });
+
+        float lastX = -10.0f;
+        g.setColour (Theme::dim.withAlpha (0.85f));
+        for (; it != t.end(); ++it)
+        {
+            const float x = sampleToX ((double) it->position);
+            if (x > w + 2.0f)
+                break;
+            if (it->strength < threshold || x - lastX < 3.0f)
+                continue;
+
+            lastX = x;
+            g.fillRect (x - 0.5f, (float) body.getY(), 1.0f, 6.0f + 10.0f * it->strength);
+        }
     }
 
     // Pad markers; the selected one is drawn last so it stays on top

@@ -3,6 +3,35 @@
 #include <algorithm>
 #include <cmath>
 
+namespace
+{
+    // The detected transient closest to `position` within [position - before, position + after] that is at least
+    // `minStrength` strong, or -1. Read-only on immutable data, so it is safe on the audio thread.
+    juce::int64 findTransientNear (const SampleData& sample, juce::int64 position,
+                                   juce::int64 before, juce::int64 after, float minStrength)
+    {
+        const auto& t = sample.transients;
+        auto it = std::lower_bound (t.begin(), t.end(), position - before,
+                                    [] (const Transient& a, juce::int64 p) { return a.position < p; });
+
+        juce::int64 best = -1;
+        juce::int64 bestDistance = 0;
+        for (; it != t.end() && it->position <= position + after; ++it)
+        {
+            if (it->strength < minStrength)
+                continue;
+
+            const juce::int64 distance = it->position > position ? it->position - position : position - it->position;
+            if (best < 0 || distance < bestDistance)
+            {
+                best = it->position;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
+}
+
 //==============================================================================
 // Construction / parameters
 //==============================================================================
@@ -58,6 +87,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout CutbenchProcessor::createLay
     releaseRange.setSkewForCentre (150.0f);
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "releaseMs", 1 }, "Release", releaseRange, 0.0f,
                                                        AudioParameterFloatAttributes().withLabel ("ms")));
+
+    // --- Phase 4: transients ---
+    // Sensitivity: higher = weaker hits count as transients (Auto Slice, Snap, ticks in the waveform)
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "sensitivity", 1 }, "Sensitivity",
+                                                       NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.5f));
+    // Snap: new cues (live chop, double-click, Set Pad) jump to the nearest transient
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "snap", 1 }, "Snap", true));
     return layout;
 }
 
@@ -85,6 +121,8 @@ CutbenchProcessor::CutbenchProcessor()
     loopParam     = apvts.getRawParameterValue ("loop");
     attackParam   = apvts.getRawParameterValue ("attackMs");
     releaseParam  = apvts.getRawParameterValue ("releaseMs");
+    sensitivityParam = apvts.getRawParameterValue ("sensitivity");
+    snapParam     = apvts.getRawParameterValue ("snap");
 
     for (auto& buffer : stretchIn)  buffer.assign ((size_t) kStretchMaxInput, 0.0f);
     for (auto& buffer : stretchOut) buffer.assign ((size_t) kStretchChunk, 0.0f);
@@ -301,7 +339,17 @@ void CutbenchProcessor::padOn (int pad, float velocity)
 
         if (reference != nullptr)
         {
-            const auto position = (juce::int64) audiblePosition (*reference);
+            auto position = (juce::int64) audiblePosition (*reference);
+
+            // Snap to the nearest transient. A key press usually lands a little after the hit, so look further back.
+            if (snapParam->load() > 0.5f && ! activeSample->transients.empty())
+            {
+                const double sr = activeSample->sampleRate;
+                const auto snapped = findTransientNear (*activeSample, position, (juce::int64) (0.150 * sr),
+                                                        (juce::int64) (0.030 * sr), getTransientThreshold());
+                if (snapped >= 0)
+                    position = snapped;
+            }
             padStart[(size_t) pad].store (juce::jlimit<juce::int64> (0, length - 1, position), std::memory_order_relaxed);
             padEnd[(size_t) pad].store (-1, std::memory_order_relaxed);
             bumpPadVersion();
@@ -767,6 +815,7 @@ void CutbenchProcessor::decodeFile (const juce::File& file, std::shared_ptr<Samp
         d->file = file;
         d->name = file.getFileName();
         d->buildPeaks();
+        d->findTransients();
         out = std::move (d);
     }
     catch (const std::exception& e)
@@ -899,6 +948,15 @@ void CutbenchProcessor::setPadStart (int pad, juce::int64 position)
     if (len <= kMinRegionLength || pad < 0 || pad >= kNumPads)
         return;
 
+    if (snapParam->load() > 0.5f)
+        if (const auto sample = getSample())
+        {
+            const auto window = (juce::int64) (0.040 * sample->sampleRate);
+            const auto snapped = findTransientNear (*sample, position, window, window, getTransientThreshold());
+            if (snapped >= 0)
+                position = snapped;
+        }
+
     padStart[(size_t) pad].store (juce::jlimit<juce::int64> (0, len - kMinRegionLength, position));
     padEnd[(size_t) pad].store (-1);
     bumpPadVersion();
@@ -971,6 +1029,59 @@ void CutbenchProcessor::clearAllPads()
     c.type = Command::Type::releasePad;
     c.pad = -1;
     pushCommand (c);
+}
+
+void CutbenchProcessor::autoSlice (int maxPads, juce::int64 from, juce::int64 to)
+{
+    const auto sample = getSample();
+    if (sample == nullptr)
+        return;
+
+    const juce::int64 len = sample->numFrames();
+    from = juce::jlimit<juce::int64> (0, len, from);
+    to   = (to < 0) ? len : juce::jlimit<juce::int64> (0, len, to);
+    if (to - from < kMinRegionLength)
+        return;
+
+    // Transients inside the region that are strong enough (not right at its edges: pad 1 starts at `from` anyway)
+    const float threshold = getTransientThreshold();
+    const juce::int64 edge = (juce::int64) (0.030 * sample->sampleRate);
+
+    std::vector<Transient> candidates;
+    for (const auto& t : sample->transients)
+        if (t.position > from + edge && t.position < to - edge && t.strength >= threshold)
+            candidates.push_back (t);
+
+    // More hits than pads: keep the strongest ones
+    const int maxCues = juce::jlimit (1, kNumPads, maxPads);
+    if ((int) candidates.size() > maxCues - 1)
+    {
+        std::sort (candidates.begin(), candidates.end(),
+                   [] (const Transient& a, const Transient& b) { return a.strength > b.strength; });
+        candidates.resize ((size_t) (maxCues - 1));
+        std::sort (candidates.begin(), candidates.end(),
+                   [] (const Transient& a, const Transient& b) { return a.position < b.position; });
+    }
+
+    std::vector<juce::int64> cues { from };
+    for (const auto& t : candidates)
+        cues.push_back (t.position);
+
+    for (int i = 0; i < kNumPads; ++i)
+    {
+        if (i < (int) cues.size())
+        {
+            padStart[(size_t) i].store (cues[(size_t) i]);
+            padEnd[(size_t) i].store (i + 1 < (int) cues.size() ? cues[(size_t) i + 1] : to);
+        }
+        else
+        {
+            padStart[(size_t) i].store (-1);
+            padEnd[(size_t) i].store (-1);
+        }
+    }
+    selectedPad.store (juce::jmin ((int) cues.size(), kNumPads - 1));
+    bumpPadVersion();
 }
 
 void CutbenchProcessor::chopEqual (int numPads, juce::int64 from, juce::int64 to)
