@@ -110,7 +110,7 @@ private:
     struct Voice
     {
         bool active = false, releasing = false, preview = false;
-        bool reverse = false, loop = false, flushing = false;
+        bool flushing = false;
         int pad = -1;
         int stretchSlot = -1;          // index into stretchPool, or -1 for the Vinyl engine
         int flushLeft = 0;             // stretch engine: output frames left after the region ended
@@ -124,7 +124,7 @@ private:
 
     struct Command
     {
-        enum class Type { padOn, padOff, playRegion, stopAll } type = Type::stopAll;
+        enum class Type { padOn, padOff, playRegion, stopAll, releasePad } type = Type::stopAll;
         int pad = -1;
         juce::int64 start = 0, end = 0;
     };
@@ -156,7 +156,7 @@ private:
     void handleMidi (const juce::MidiMessage&);
     void padOn (int pad, float velocity);
     void padOff (int pad);
-    void releaseVoice (Voice&, bool soft);
+    void releaseVoice (Voice&);
     void startVoice (int pad, juce::int64 start, juce::int64 end, float velocity, bool preview);
     int  acquireStretchSlot() const;
     double audiblePosition (const Voice&) const;

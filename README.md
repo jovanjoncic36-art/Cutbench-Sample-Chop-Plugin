@@ -58,15 +58,15 @@ that part, in both modes). **Chop Equal** divides the selected region (or the wh
 |---|---|
 | Pitch / Fine Tune | Pitch: -24..+24 semitones, shown as a plain number with [-] / [+] buttons (hold to repeat); the number can also be dragged. Fine Tune: +/-100 cents. Double-click Pitch, Fine Tune, Speed or any knob to reset it. |
 | Speed | 0.25x..4x playback speed |
-| Engine: Vinyl | Pitch and speed are linked, like tape or a turntable (speed 2x = one octave up). Cubic-interpolated resampling, cheap, no added latency. Best for tight live chopping. |
+| Engine: Vinyl | Pitch and speed are linked, like tape or a turntable (speed 2x = +12 semitones = one octave up). The two controls follow each other: moving Speed changes Pitch / Fine Tune and the other way round (0.25x..4x = -24..+24 semitones). Switching from Keep Length to Vinyl sets Speed from Pitch + Fine. Cubic-interpolated resampling, cheap, no added latency. Best for tight live chopping. Automating Speed alone has no effect in Vinyl; automate Pitch. |
 | Engine: Keep Length | Pitch and speed are independent (Signalsmith Stretch). Pitch +5 keeps the duration, speed 0.5x keeps the pitch. Starts right on the cue point (the engine is primed with the first frames), but uses more CPU; at most 8 voices use it, further voices fall back to Vinyl. |
-| Reverse | Plays each region backwards (applies to hits started after switching) |
-| Loop | Repeats the region while the pad sounds (Gate: until key release; One-Shot: until another pad / Stop) |
-| Attack / Release (knobs) | Fade-in on trigger / fade-out on key release (Gate) and at the end of a region. 0 = just the declick fade. The value shows while you drag or hover. |
+| Reverse | Plays the chop backwards, live: switching it flips the direction of what is playing |
+| Loop | Repeats the chop while the pad sounds, live: switch it on or off at any time (Gate: until key release; One-Shot: until another pad / Stop) |
+| Attack / Release (knobs) | Attack: fade-in on trigger. Release: fade-out time whenever a sound ends early: key release (Gate), another pad cutting it (Mono), Stop, clearing the pad, and at the end of a chop (never longer than the chop itself). 0 = just the declick fade. One-Shot ignores key release by design. The value shows while you drag or hover. |
 | Declick Fade (settings menu) | Short fade (0.5-20 ms) used for cuts, region ends and loop seams |
 | End handle | Select a pad, then drag the grip at the bottom edge of its region to set where it stops. Double-click it to go back to "until the next cue" |
 
-Pitch, speed, Attack, Release and Fade are automatable in Live. Reverse and Loop are read when a pad is triggered.
+Pitch, speed, Attack, Release and Fade are automatable in Live. Reverse and Loop take effect immediately, also while a pad is playing or looping.
 
 | Action | How |
 |---|---|
@@ -78,6 +78,8 @@ Pitch, speed, Attack, Release and Fade are automatable in Live. Reverse and Loop
 | Play a pad | Click the pad or its flag in the top strip of the waveform |
 | Clear a pad | Right-click it, Clear Pad, or Delete key; Clear All clears everything |
 | Zoom / scroll | Cmd/Ctrl + scroll, pinch, +/-/Fit; scroll or swipe to pan |
+
+Pads are always square. Clear Pad / Clear All also fade out the sound of the cleared pads.
 
 Every chop is tinted in its pad colour in the waveform (the selected one brighter). The Gain knob sits in the top right corner.
 

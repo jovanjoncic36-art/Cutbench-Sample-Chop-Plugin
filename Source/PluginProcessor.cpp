@@ -247,7 +247,7 @@ void CutbenchProcessor::handleMidi (const juce::MidiMessage& m)
     else if (m.isAllNotesOff() || m.isAllSoundOff())
     {
         for (auto& v : voices)
-            releaseVoice (v, false);
+            releaseVoice (v);
     }
 }
 
@@ -279,7 +279,7 @@ double CutbenchProcessor::audiblePosition (const Voice& v) const
 
     // A stretch voice reads its input ahead of what is audible by the engine's start length.
     const double lag = (double) stretchPool[(size_t) v.stretchSlot].startLength (speedValue * fileToHost);
-    return v.reverse ? v.pos + lag : v.pos - lag;
+    return reverseOn ? v.pos + lag : v.pos - lag;
 }
 
 void CutbenchProcessor::padOn (int pad, float velocity)
@@ -317,7 +317,7 @@ void CutbenchProcessor::padOn (int pad, float velocity)
 
     for (auto& v : voices)
         if (v.active && (v.preview || ! polyMode || v.pad == pad))
-            releaseVoice (v, false);
+            releaseVoice (v);
 
     startVoice (pad, start, end, velocity, false);
 }
@@ -329,23 +329,18 @@ void CutbenchProcessor::padOff (int pad)
 
     for (auto& v : voices)
         if (v.active && ! v.preview && v.pad == pad)
-            releaseVoice (v, true);
+            releaseVoice (v);
 }
 
-// soft = use the Release time (key released); otherwise a quick declick fade (voice is being cut)
-void CutbenchProcessor::releaseVoice (Voice& v, bool soft)
+// Fades a voice out over the Release time (never shorter than the declick fade). Used for everything that ends a
+// sound early: key release in Gate mode, another pad cutting it in Mono mode, Stop, clearing the pad.
+void CutbenchProcessor::releaseVoice (Voice& v)
 {
-    if (! v.active)
+    if (! v.active || v.releasing)
         return;
 
-    const float inc = 1.0f / (soft ? releaseSamples : fadeSamples);
-    if (v.releasing)
-        v.relInc = juce::jmax (v.relInc, soft ? 0.0f : inc);   // a cut may speed up a slower release
-    else
-    {
-        v.releasing = true;
-        v.relInc = inc;
-    }
+    v.releasing = true;
+    v.relInc = 1.0f / releaseSamples;
 }
 
 int CutbenchProcessor::acquireStretchSlot() const
@@ -379,7 +374,7 @@ void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end,
     if (preview)   // a new preview replaces the previous one
         for (auto& v : voices)
             if (v.active && v.preview)
-                releaseVoice (v, false);
+                releaseVoice (v);
 
     Voice* slot = nullptr;
     for (auto& v : voices)
@@ -396,13 +391,11 @@ void CutbenchProcessor::startVoice (int pad, juce::int64 start, juce::int64 end,
     *slot = Voice {};
     slot->active   = true;
     slot->preview  = preview;
-    slot->reverse  = reverseOn;
-    slot->loop     = loopOn;
     slot->pad      = pad;
     slot->start    = start;
     slot->end      = end;
     slot->pos      = reverseOn ? (double) (end - 1) : (double) start;
-    slot->curRate  = speedValue * pitchRatio * fileToHost;
+    slot->curRate  = (keepLength ? speedValue : 1.0) * pitchRatio * fileToHost;
     slot->gain     = juce::jlimit (0.0f, 1.0f, velocity);
     slot->age      = ++voiceCounter;
 
@@ -470,17 +463,18 @@ void CutbenchProcessor::renderVinylVoice (Voice& v, juce::AudioBuffer<float>& ou
     float* outL = out.getWritePointer (0, startSample);
     float* outR = out.getNumChannels() > 1 ? out.getWritePointer (1, startSample) : nullptr;
 
-    const double targetRate = speedValue * pitchRatio * fileToHost;
+    // Vinyl: the pitch alone sets the rate (the Speed control just mirrors it, see the editor). A voice that fell back
+    // to this engine while Keep Length is selected also honours Speed.
+    const double targetRate = (keepLength ? speedValue : 1.0) * pitchRatio * fileToHost;
     const double regionLen = (double) (v.end - v.start);
     const double startPos = (double) v.start;
     const double endPos = (double) v.end;
     const float wrapInc = 1.0f / fadeSamples;
 
-    // Length of the fade at the end of the region: the Release time, but never more than half the region
+    // Fade at the end of the region: the Release time (at least the declick fade), at most the whole region
     const double rate0 = juce::jmax (v.curRate, 1.0e-6);
-    const float tailLen = v.loop ? fadeSamples
-                                 : juce::jmax (1.0f, (float) juce::jmin ((double) juce::jmax (fadeSamples, releaseSamples),
-                                                                         0.5 * regionLen / rate0));
+    const float tailLen = loopOn ? fadeSamples
+                                 : juce::jmax (1.0f, (float) juce::jmin ((double) releaseSamples, regionLen / rate0));
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -494,7 +488,7 @@ void CutbenchProcessor::renderVinylVoice (Voice& v, juce::AudioBuffer<float>& ou
         const float l = readCubic (srcL, last, idx, frac);
         const float r = outR != nullptr ? readCubic (srcR, last, idx, frac) : 0.0f;
 
-        const double remainingSrc = v.reverse ? (v.pos - startPos) : (endPos - v.pos);
+        const double remainingSrc = reverseOn ? (v.pos - startPos) : (endPos - v.pos);
         const double remainingOut = remainingSrc / juce::jmax (v.curRate, 1.0e-6);
         const float tail = remainingOut >= (double) tailLen ? 1.0f : (float) juce::jmax (0.0, remainingOut / (double) tailLen);
 
@@ -505,14 +499,14 @@ void CutbenchProcessor::renderVinylVoice (Voice& v, juce::AudioBuffer<float>& ou
         if (outR != nullptr)
             outR[i] += r * g;
 
-        v.pos += v.reverse ? -v.curRate : v.curRate;
+        v.pos += reverseOn ? -v.curRate : v.curRate;
 
-        const bool past = v.reverse ? (v.pos < startPos) : (v.pos >= endPos);
+        const bool past = reverseOn ? (v.pos < startPos) : (v.pos >= endPos);
         if (past)
         {
-            if (v.loop && ! v.releasing)
+            if (loopOn && ! v.releasing)
             {
-                v.pos += v.reverse ? regionLen : -regionLen;
+                v.pos += reverseOn ? regionLen : -regionLen;
                 v.pos = juce::jlimit (startPos, endPos - 0.001, v.pos);
                 v.wrapRamp = 0.0f;   // short fade-in after the jump hides the loop seam
             }
@@ -533,7 +527,7 @@ void CutbenchProcessor::fillStretchInput (Voice& v, float* inL, float* inR, int 
     const float* srcL = audio.getReadPointer (0);
     const float* srcR = audio.getNumChannels() > 1 ? audio.getReadPointer (1) : srcL;
 
-    const double step = v.reverse ? -1.0 : 1.0;
+    const double step = reverseOn ? -1.0 : 1.0;
     const double startPos = (double) v.start;
     const double endPos = (double) v.end;
 
@@ -555,11 +549,11 @@ void CutbenchProcessor::fillStretchInput (Voice& v, float* inL, float* inR, int 
 
         if (! v.flushing)
         {
-            const bool past = v.reverse ? (v.pos < startPos) : (v.pos >= endPos);
+            const bool past = reverseOn ? (v.pos < startPos) : (v.pos >= endPos);
             if (past)
             {
-                if (v.loop && ! v.releasing)
-                    v.pos = v.reverse ? (double) (v.end - 1) : startPos;
+                if (loopOn && ! v.releasing)
+                    v.pos = reverseOn ? (double) (v.end - 1) : startPos;
                 else
                 {
                     v.flushing = true;
@@ -654,9 +648,14 @@ void CutbenchProcessor::drainCommands()
             case Command::Type::padOn:      padOn (c.pad, 1.0f); break;
             case Command::Type::padOff:     padOff (c.pad); break;
             case Command::Type::playRegion: startVoice (-1, c.start, c.end, 1.0f, true); break;
+            case Command::Type::releasePad:   // pad cleared: its sound fades out too (pad < 0 = every pad)
+                for (auto& v : voices)
+                    if (v.active && ! v.preview && (c.pad < 0 || v.pad == c.pad))
+                        releaseVoice (v);
+                break;
             case Command::Type::stopAll:
                 for (auto& v : voices)
-                    releaseVoice (v, false);
+                    releaseVoice (v);
                 break;
         }
     };
@@ -952,6 +951,11 @@ void CutbenchProcessor::clearPad (int pad)
     padStart[(size_t) pad].store (-1);
     padEnd[(size_t) pad].store (-1);
     bumpPadVersion();
+
+    Command c;
+    c.type = Command::Type::releasePad;
+    c.pad = pad;
+    pushCommand (c);
 }
 
 void CutbenchProcessor::clearAllPads()
@@ -962,6 +966,11 @@ void CutbenchProcessor::clearAllPads()
         padEnd[i].store (-1);
     }
     bumpPadVersion();
+
+    Command c;
+    c.type = Command::Type::releasePad;
+    c.pad = -1;
+    pushCommand (c);
 }
 
 void CutbenchProcessor::chopEqual (int numPads, juce::int64 from, juce::int64 to)

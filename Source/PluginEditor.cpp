@@ -124,9 +124,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     small (hintLabel, "play, then hit EMPTY pads to set cues | pad with cue: jump + play | dbl-click: set cue | right-click pad: clear",
            juce::Justification::centredRight);
     small (infoLabel, "BPM --    KEY --", juce::Justification::centredRight);   // detection arrives in a later phase
-    small (versionLabel, juce::String ("Cutbench v") + JucePlugin_VersionString
-                         + (StretchEngine::isAvailable() ? "  |  Keep Length: on" : "  |  Keep Length: off"),
-           juce::Justification::centredLeft);
+    small (versionLabel, juce::String ("Cutbench v") + JucePlugin_VersionString, juce::Justification::centredLeft);
 
     fileLabel.setFont (fileLabel.getFont().withHeight (16.0f));
     fileLabel.setJustificationType (juce::Justification::centredLeft);
@@ -209,6 +207,11 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     proc.addChangeListener (this);
     startTimerHz (20);   // keeps the play / stop icon in sync
 
+    for (const char* id : { "pitch", "fine", "speed", "engine" })
+        proc.apvts.addParameterListener (id, this);
+    pendingParams = 4;       // make Speed match Pitch right away when the editor opens in Vinyl mode
+    triggerAsyncUpdate();
+
     setResizable (true, true);
     setResizeLimits (900, 540, 2400, 1400);
     setSize (1100, 700);
@@ -218,9 +221,75 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
 
 CutbenchEditor::~CutbenchEditor()
 {
+    for (const char* id : { "pitch", "fine", "speed", "engine" })
+        proc.apvts.removeParameterListener (id, this);
+    cancelPendingUpdate();
     stopTimer();
     proc.removeChangeListener (this);
     setLookAndFeel (nullptr);
+}
+
+void CutbenchEditor::parameterChanged (const juce::String& parameterID, float)
+{
+    if (syncing.load())
+        return;   // our own adjustment below
+
+    int bit = 0;
+    if (parameterID == "pitch" || parameterID == "fine") bit = 1;
+    else if (parameterID == "speed")                      bit = 2;
+    else if (parameterID == "engine")                     bit = 4;
+
+    if (bit != 0)
+    {
+        pendingParams.fetch_or (bit);
+        triggerAsyncUpdate();
+    }
+}
+
+void CutbenchEditor::setParameterValue (const char* id, float value)
+{
+    if (auto* parameter = proc.apvts.getParameter (id))
+    {
+        const float normalised = parameter->convertTo0to1 (value);
+        if (std::abs (normalised - parameter->getValue()) < 1.0e-6f)
+            return;
+
+        syncing = true;
+        parameter->beginChangeGesture();
+        parameter->setValueNotifyingHost (normalised);
+        parameter->endChangeGesture();
+        syncing = false;
+    }
+}
+
+void CutbenchEditor::handleAsyncUpdate()
+{
+    const int changed = pendingParams.exchange (0);
+    if (changed == 0)
+        return;
+
+    // Keep Length: pitch and speed are independent, nothing to follow
+    if (proc.apvts.getRawParameterValue ("engine")->load() > 0.5f)
+        return;
+
+    // Vinyl: speed 2x is one octave up, so the two controls show the same thing and follow each other.
+    // 0.25x..4x is exactly -24..+24 semitones.
+    const double pitch = (double) proc.apvts.getRawParameterValue ("pitch")->load();
+    const double fine  = (double) proc.apvts.getRawParameterValue ("fine")->load();
+    const double speed = (double) proc.apvts.getRawParameterValue ("speed")->load();
+
+    if ((changed & (1 | 4)) != 0)   // pitch / fine changed, or just switched to Vinyl: speed follows the pitch
+    {
+        const double semitones = pitch + fine / 100.0;
+        setParameterValue ("speed", (float) juce::jlimit (0.25, 4.0, std::pow (2.0, semitones / 12.0)));
+    }
+    else                            // speed changed: pitch and fine follow it
+    {
+        const double semitones = 12.0 * std::log2 (juce::jmax (0.01, speed));
+        const double wholeSemitones = std::round (semitones);
+        setParameterValue ("pitch", (float) juce::jlimit (-24.0, 24.0, wholeSemitones));
+        setParameterValue ("fine", (float) juce::jlimit (-100.0, 100.0, (semitones - wholeSemitones) * 100.0));
+    }
 }
 
 void CutbenchEditor::timerCallback()
@@ -346,9 +415,10 @@ void CutbenchEditor::resized()
     r.removeFromBottom (10);
 
     // pad grid on the right, waveform takes everything else
-    auto padArea = r.removeFromRight (juce::jlimit (230, 340, r.getWidth() / 4));
+    const int padSide = juce::jlimit (200, 360, juce::jmin (r.getHeight(), r.getWidth() / 3));
+    auto padArea = r.removeFromRight (padSide);
     r.removeFromRight (10);
-    padGrid.setBounds (padArea);
+    padGrid.setBounds (padArea.removeFromTop (padSide));   // square area: four square pads per row and column
     waveform.setBounds (r);
 
     auto c = controlsArea.reduced (10, 8);

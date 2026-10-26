@@ -45,12 +45,16 @@ void PadGrid::timerCallback()
 
 juce::Rectangle<float> PadGrid::cellBounds (int pad) const
 {
+    // Every pad is a square: the side is the largest that fits, the grid is centred horizontally, top-aligned
     const auto area = getLocalBounds().toFloat();
-    const float cw = (area.getWidth()  - kGap * (kCols - 1)) / (float) kCols;
-    const float ch = (area.getHeight() - kGap * (kRows - 1)) / (float) kRows;
+    const float side = juce::jmax (1.0f, juce::jmin ((area.getWidth()  - kGap * (kCols - 1)) / (float) kCols,
+                                                     (area.getHeight() - kGap * (kRows - 1)) / (float) kRows));
+    const float gridWidth = side * (float) kCols + kGap * (float) (kCols - 1);
+    const float originX = area.getX() + (area.getWidth() - gridWidth) * 0.5f;
+
     const int col = pad % kCols;
     const int row = (kRows - 1) - pad / kCols;   // pad 1 at the bottom
-    return { area.getX() + (float) col * (cw + kGap), area.getY() + (float) row * (ch + kGap), cw, ch };
+    return { originX + (float) col * (side + kGap), area.getY() + (float) row * (side + kGap), side, side };
 }
 
 int PadGrid::padAt (juce::Point<float> p) const
@@ -70,7 +74,7 @@ void PadGrid::paint (juce::Graphics& g)
         const auto cell = cellBounds (i);
         const auto colour = Theme::padColour (i);
         const bool isSet = pads[(size_t) i].isSet();
-        const bool sounding = (activeMask >> i) & 1u;
+        const bool sounding = isSet && ((activeMask >> i) & 1u) != 0;   // a cleared pad is never lit
         const bool selected = (i == selectedPad);
 
         g.setColour (sounding ? colour.withAlpha (0.95f)
