@@ -77,7 +77,7 @@ Pitch, speed, Attack, Release and Fade are automatable in Live. Reverse and Loop
 | Move a cue | Drag its marker line |
 | Play a pad | Click the pad or its flag in the top strip of the waveform |
 | Clear a pad | Right-click it, Clear Pad, or Delete key; Clear All clears everything |
-| Zoom / scroll | Cmd/Ctrl + scroll, pinch, +/-/Fit; scroll or swipe to pan |
+| Zoom / scroll | Fit, - and + sit next to the scroll bar under the waveform; also Cmd/Ctrl + scroll and pinch; scroll or swipe to pan |
 
 **Auto Slice (transients)**: when a file loads, Cutbench detects the hits in it (faint ticks at the top of the waveform).
 **Auto Slice** puts one cue on each detected transient of the selected region (or of the whole sample if nothing is
@@ -85,10 +85,14 @@ selected) and fills pads 1..N, at most as many as the pad count next to Chop Equ
 are kept). **Sens** decides how weak a hit may be and still count: higher = more ticks and more slices. The ticks follow
 the setting live. Slices stay editable (drag markers, end handle) and the audio is never modified.
 
-**Snap**: when on, a new cue jumps to the nearest transient: live chop (the search reaches 150 ms back and 30 ms ahead,
+**Snap** (button text "Snap: On" / "Snap: Off"): when on, a new cue jumps to the nearest transient: live chop (the search reaches 150 ms back and 30 ms ahead,
 because a key press usually lands a little after the hit), double-click and Set Pad (+/- 40 ms). Switch it off for exact
 manual placement. Dragging a marker never snaps. Detection is a fast energy-based method tuned for drums and other
 percussive material; on smooth or tonal material use Sens or place cues by hand.
+
+The controls are grouped in two racks under the waveform. Rack 1: PADS (Set Pad, Clear Pad, Clear All), CHOP EQUAL
+(even parts) and AUTO SLICE (on the hits, with Sens and Snap). Rack 2: Attack and Release knobs, Pitch, Fine Tune, Speed,
+Engine, Reverse, Loop, Play Mode and Voices.
 
 Pads are always square. Clear Pad / Clear All also fade out the sound of the cleared pads.
 

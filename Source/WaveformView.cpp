@@ -5,7 +5,7 @@
 
 namespace
 {
-    constexpr int kScrollBarHeight = 12;
+    constexpr int kBottomBarHeight = 24;   // scroll bar + zoom buttons
     constexpr double kMinSamplesPerPixel = 1.0;
 }
 
@@ -16,6 +16,12 @@ WaveformView::WaveformView (CutbenchProcessor& p) : proc (p)
     hbar.setAutoHide (false);
     hbar.addListener (this);
     addAndMakeVisible (hbar);
+
+    for (auto* b : { &fitButton, &zoomOutButton, &zoomInButton })
+        addAndMakeVisible (*b);
+    fitButton.onClick     = [this] { zoomToFit(); };
+    zoomOutButton.onClick = [this] { zoomBy (2.0); };
+    zoomInButton.onClick  = [this] { zoomBy (0.5); };
 
     refreshPads();
     startTimerHz (30);
@@ -143,7 +149,7 @@ void WaveformView::togglePlayback()
 //==============================================================================
 juce::Rectangle<int> WaveformView::getWaveArea() const
 {
-    return getLocalBounds().withTrimmedBottom (kScrollBarHeight);
+    return getLocalBounds().withTrimmedBottom (kBottomBarHeight);
 }
 
 juce::int64 WaveformView::clampSample (double s) const
@@ -223,7 +229,16 @@ void WaveformView::zoomToFit()
 
 void WaveformView::resized()
 {
-    hbar.setBounds (getLocalBounds().removeFromBottom (kScrollBarHeight));
+    // bottom bar: scroll bar on the left, Fit / - / + on the right
+    auto bottom = getLocalBounds().removeFromBottom (kBottomBarHeight);
+    auto buttons = bottom.removeFromRight (36 + 28 + 28 + 2 * 4);
+    fitButton.setBounds (buttons.removeFromLeft (36).withSizeKeepingCentre (36, 20));
+    buttons.removeFromLeft (4);
+    zoomOutButton.setBounds (buttons.removeFromLeft (28).withSizeKeepingCentre (28, 20));
+    buttons.removeFromLeft (4);
+    zoomInButton.setBounds (buttons.withSizeKeepingCentre (28, 20));
+    bottom.removeFromRight (8);
+    hbar.setBounds (bottom.withSizeKeepingCentre (bottom.getWidth(), 14));
 
     if (fitted)
     {

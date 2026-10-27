@@ -82,6 +82,7 @@ private:
 
     CutbenchProcessor& proc;
     juce::ScrollBar hbar { false };
+    juce::TextButton fitButton { "Fit" }, zoomOutButton { "-" }, zoomInButton { "+" };   // next to the scroll bar
 
     std::shared_ptr<const SampleData> data;
     CutbenchProcessor::PadArray pads;

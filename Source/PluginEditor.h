@@ -51,13 +51,13 @@ private:
     juce::TextButton loadButton { "Load..." },
                      setPadButton { "Set Pad" }, clearPadButton { "Clear Pad" }, clearAllButton { "Clear All" },
                      chopButton { "Chop Equal" }, autoSliceButton { "Auto Slice" }, snapButton { "Snap" },
-                     zoomInButton { "+" }, zoomOutButton { "-" }, fitButton { "Fit" },
                      reverseButton { "Reverse" }, loopButton { "Loop" },
                      pitchDownButton { "-" }, pitchUpButton { "+" };
 
     juce::Label fileLabel, infoLabel, versionLabel, statusLabel, hintLabel;
     juce::Label pitchLabel, fineLabel, speedLabel, engineLabel, directionLabel, repeatLabel;
     juce::Label attackLabel, releaseLabel, gainLabel, modeLabel, padModeLabel;
+    juce::Label padsCaption, chopCaption, autoCaption;   // group titles in the first rack
 
     // gainSlider, attackSlider and releaseSlider are rotary knobs, the others are drag bars.
     // Base note and declick fade live in the settings menu (the gear button).
@@ -74,7 +74,8 @@ private:
     std::atomic<int> pendingParams { 0 };   // 1 = pitch / fine changed, 2 = speed changed, 4 = engine changed
     std::atomic<bool> syncing { false };
 
-    juce::Rectangle<int> controlsArea;
+    juce::Rectangle<int> rack1Area, rack2Area;   // rack 1: pads / chop equal / auto slice, rack 2: playback
+    int dividerX1 = 0, dividerX2 = 0;
     std::unique_ptr<juce::FileChooser> chooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CutbenchEditor)

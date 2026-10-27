@@ -75,10 +75,11 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     addAndMakeVisible (playStopButton);
     addAndMakeVisible (settingsButton);
     for (auto* b : { &loadButton, &setPadButton, &clearPadButton, &clearAllButton,
-                     &chopButton, &autoSliceButton, &snapButton, &zoomInButton, &zoomOutButton, &fitButton,
+                     &chopButton, &autoSliceButton, &snapButton,
                      &reverseButton, &loopButton, &pitchDownButton, &pitchUpButton })
         addAndMakeVisible (*b);
     for (auto* l : { &fileLabel, &infoLabel, &versionLabel, &statusLabel, &hintLabel,
+                     &padsCaption, &chopCaption, &autoCaption,
                      &pitchLabel, &fineLabel, &speedLabel, &engineLabel, &directionLabel, &repeatLabel,
                      &attackLabel, &releaseLabel, &gainLabel, &modeLabel, &padModeLabel })
         addAndMakeVisible (*l);
@@ -121,6 +122,9 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     small (repeatLabel, "REPEAT");
     small (modeLabel, "PLAY MODE");
     small (padModeLabel, "VOICES");
+    small (padsCaption, "PADS", juce::Justification::centredLeft);
+    small (chopCaption, "CHOP EQUAL (even parts)", juce::Justification::centredLeft);
+    small (autoCaption, "AUTO SLICE (on the hits)", juce::Justification::centredLeft);
     small (statusLabel, {}, juce::Justification::centredLeft);
     small (hintLabel, "play, then hit EMPTY pads to set cues | pad with cue: jump + play | dbl-click: set cue | right-click pad: clear",
            juce::Justification::centredRight);
@@ -154,6 +158,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     for (auto* b : { &reverseButton, &loopButton, &snapButton })
         b->setClickingTogglesState (true);
     snapAttachment = std::make_unique<ButtonAttachment> (apvts, "snap", snapButton);
+    snapButton.setButtonText (snapButton.getToggleState() ? "Snap: On" : "Snap: Off");
     reverseAttachment = std::make_unique<ButtonAttachment> (apvts, "reverse", reverseButton);
     loopAttachment    = std::make_unique<ButtonAttachment> (apvts, "loop", loopButton);
 
@@ -186,9 +191,6 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     setPadButton.onClick     = [this] { waveform.assignToSelectedPad(); };
     clearPadButton.onClick   = [this] { proc.clearPad (proc.getSelectedPad()); };
     clearAllButton.onClick   = [this] { proc.clearAllPads(); };
-    zoomInButton.onClick     = [this] { waveform.zoomBy (0.5); };
-    zoomOutButton.onClick    = [this] { waveform.zoomBy (2.0); };
-    fitButton.onClick        = [this] { waveform.zoomToFit(); };
 
     // Chop Equal divides the selected region, or the whole sample when nothing is selected
     chopButton.onClick = [this]
@@ -228,7 +230,7 @@ CutbenchEditor::CutbenchEditor (CutbenchProcessor& p)
     triggerAsyncUpdate();
 
     setResizable (true, true);
-    setResizeLimits (900, 540, 2400, 1400);
+    setResizeLimits (900, 590, 2400, 1400);
     setSize (1100, 700);
 
     changeListenerCallback (nullptr);   // initial sync
@@ -310,6 +312,7 @@ void CutbenchEditor::handleAsyncUpdate()
 void CutbenchEditor::timerCallback()
 {
     playStopButton.setPlaying (proc.getPlayhead() >= 0);
+    snapButton.setButtonText (snapButton.getToggleState() ? "Snap: On" : "Snap: Off");   // also follows host automation
 }
 
 void CutbenchEditor::openSettings()
@@ -390,8 +393,19 @@ void CutbenchEditor::filesDropped (const juce::StringArray& files, int, int)
 void CutbenchEditor::paint (juce::Graphics& g)
 {
     g.fillAll (Theme::bg);
-    g.setColour (Theme::panel);
-    g.fillRoundedRectangle (controlsArea.toFloat(), 6.0f);
+
+    for (const auto& rack : { rack1Area, rack2Area })
+    {
+        g.setColour (Theme::panel);
+        g.fillRoundedRectangle (rack.toFloat(), 6.0f);
+        g.setColour (Theme::grid);
+        g.drawRoundedRectangle (rack.toFloat().reduced (0.5f), 6.0f, 1.0f);
+    }
+
+    // dividers between the groups of the first rack
+    g.setColour (Theme::grid);
+    for (const int x : { dividerX1, dividerX2 })
+        g.drawVerticalLine (x, (float) rack1Area.getY() + 10.0f, (float) rack1Area.getBottom() - 10.0f);
 }
 
 void CutbenchEditor::resized()
@@ -425,44 +439,62 @@ void CutbenchEditor::resized()
     statusLabel.setBounds (statusRow);
     r.removeFromBottom (6);
 
-    // controls: one row of buttons, one row of knobs and parameters
-    controlsArea = r.removeFromBottom (132);
+    // two racks at the bottom: 1) pads, chop equal, auto slice   2) playback (envelope, pitch, direction ...)
+    const int rack1Height = 60, rack2Height = 92, rackGap = 8;
+    rack2Area = r.removeFromBottom (rack2Height);
+    r.removeFromBottom (rackGap);
+    rack1Area = r.removeFromBottom (rack1Height);
     r.removeFromBottom (10);
 
-    // pad grid on the right, waveform takes everything else
+    // pad grid on the right (a square area), waveform takes everything else
     const int padSide = juce::jlimit (200, 360, juce::jmin (r.getHeight(), r.getWidth() / 3));
     auto padArea = r.removeFromRight (padSide);
     r.removeFromRight (10);
-    padGrid.setBounds (padArea.removeFromTop (padSide));   // square area: four square pads per row and column
+    padGrid.setBounds (padArea.removeFromTop (padSide));   // four square pads per row and column
     waveform.setBounds (r);
 
-    auto c = controlsArea.reduced (10, 8);
-
-    auto row1 = c.removeFromTop (28);
-    c.removeFromTop (6);
-
-    auto zoom = row1.removeFromRight (3 * 44 + 2 * 6);
-    fitButton.setBounds (zoom.removeFromLeft (44));
-    zoom.removeFromLeft (6);
-    zoomOutButton.setBounds (zoom.removeFromLeft (44));
-    zoom.removeFromLeft (6);
-    zoomInButton.setBounds (zoom);
-
-    auto place = [&row1] (juce::Component& comp, int width, int gapAfter = 6)
+    // ---- rack 1: three groups side by side, each with a title above it ----
     {
-        comp.setBounds (row1.removeFromLeft (width));
-        row1.removeFromLeft (gapAfter);
-    };
-    place (setPadButton, 76);
-    place (clearPadButton, 80);
-    place (clearAllButton, 76, 12);
-    place (chopButton, 84);
-    place (chopCountSlider, 84, 12);
-    place (autoSliceButton, 84);
-    place (sensitivitySlider, 92);
-    place (snapButton, 52);
+        auto inner = rack1Area.reduced (14, 6);
+        const auto captionRow = inner.removeFromTop (14);
+        const auto controlRow = inner.removeFromTop (30);
+        int x = inner.getX();
 
-    // Parameter row: columns sized by weight, the control on top and its label below it
+        auto put = [&] (juce::Component& comp, int width, int gapAfter = 6)
+        {
+            comp.setBounds (x, controlRow.getY(), width, controlRow.getHeight());
+            x += width + gapAfter;
+        };
+
+        const int groupGap = 14;
+
+        int start = x;
+        put (setPadButton, 76);
+        put (clearPadButton, 80);
+        put (clearAllButton, 76, 0);
+        padsCaption.setBounds (start, captionRow.getY(), x - start, captionRow.getHeight());
+        x += groupGap;
+        dividerX1 = x;
+        x += groupGap;
+
+        start = x;
+        put (chopButton, 90);
+        put (chopCountSlider, 84, 0);
+        chopCaption.setBounds (start, captionRow.getY(), x - start + 60, captionRow.getHeight());
+        x += groupGap;
+        dividerX2 = x;
+        x += groupGap;
+
+        start = x;
+        put (autoSliceButton, 90);
+        put (sensitivitySlider, 92);
+        put (snapButton, 84, 0);
+        autoCaption.setBounds (start, captionRow.getY(), x - start, captionRow.getHeight());
+    }
+
+    // ---- rack 2: knobs and parameters, the control on top and its label below it ----
+    auto c = rack2Area.reduced (12, 8);
+
     using Place = std::function<void (juce::Rectangle<int>)>;
     struct Cell { juce::Label* label; Place place; int weight; };
 
